@@ -1,5 +1,18 @@
 # Build Log — Walmart M5 MLOps Forecasting Project
 
+> **Resume point (end of 2026-08-12 session):** Phases 0-4 complete and
+> pushed to GitHub. Next up is Phase 5 (Airflow), decided to run it via
+> Docker Compose rather than native pip install (Airflow doesn't
+> officially support Windows outside WSL2/Docker).
+>
+> To pick back up: the local `mlflow server` process from this session
+> will have stopped (it doesn't persist between sessions). Restart it
+> before touching `serving/app.py` or `src/train.py` again:
+> `mlflow server --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0
+> --allowed-hosts "host.docker.internal:5000,127.0.0.1:5000,localhost:5000"`
+> — the registered models and run history are still there in `mlflow.db`
+> (gitignored but still on disk locally), nothing needs retraining.
+
 Running log of what we did, which tool it involved, why we did it, and any
 difficulties hit along the way. Written to be re-read before an interview.
 
