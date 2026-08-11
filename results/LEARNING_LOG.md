@@ -402,3 +402,64 @@ still open it in Jupyter/VS Code and re-run cells by hand.
   `.gitignore` — regenerable from `src/train.py`, shouldn't bloat git.
 
 ---
+
+## Phase 3 — FastAPI serving (`serving/app.py`)
+
+### Design
+- `GET /health` — trivial liveness probe returning tracking URI, how many
+  series are servable, and the valid forecast date window. Cheap to
+  build, but a real signal a reviewer/interviewer will specifically look
+  for (load balancers and orchestrators poll this, not `/predict`).
+- `GET /predict?series_id=...&horizon=...` — loads the model for that
+  series via `mlflow.pyfunc.load_model(f"models:/prophet_{series_id}/latest")`
+  (the registry URI scheme, not a file path), builds the future dataframe
+  the model needs (dates + the `snap` regressor, looked up from
+  `calendar.csv`), predicts, clips negative `yhat` to 0, and returns
+  JSON.
+- **`mlflow.pyfunc.load_model` vs `mlflow.prophet.load_model`:** used
+  the generic `pyfunc` loader deliberately (per the project brief's
+  explicit instruction) rather than the Prophet-specific one. `pyfunc` is
+  MLflow's flavor-agnostic interface — every registered model, regardless
+  of what ML library trained it, exposes the same `.predict(df)` method.
+  This is what lets a serving layer stay decoupled from "what
+  library was this model trained with," which matters if the modeling
+  approach ever changes later without needing to touch serving code.
+- **Model caching:** wrapped the loader in `functools.lru_cache` so the
+  registry is only hit once per series per process lifetime, not on
+  every request. Verified empirically — first call to a fresh series
+  took ~2x longer than the cached repeat call.
+- **`/latest` alias:** confirmed `models:/<name>/latest` resolves without
+  needing to know/hardcode a version number (tested this against the
+  registry before wiring it into the endpoint, same "verify before
+  building on it" habit as the MLflow smoke test in Phase 2).
+
+### The forecast-window constraint (and why it's not a bug)
+- Models were trained on data through 2016-03-27 and evaluated through
+  2016-04-24. The `snap` regressor they need is only genuinely *known*
+  (not fabricated) through `calendar.csv`'s actual coverage, which
+  extends to 2016-06-19 — 56 more days past evaluation.
+- `/predict` computes this window at startup (`_forecast_start`,
+  `_forecast_end`) and rejects out-of-range horizons with a clear 400,
+  rather than silently guessing a future SNAP schedule. Tested this path
+  explicitly (`horizon=9999` → 400 with the exact valid range in the
+  error message; `horizon=0` → same). Also tested an unknown `series_id`
+  → clean 404 instead of a raw MLflow stack trace leaking to the client.
+- **Interview point:** this is a real constraint any regressor-based
+  forecasting API has — you can only forecast as far as your "known
+  future" exogenous inputs actually extend. A naive implementation would
+  either crash past that point or quietly extrapolate garbage; this one
+  fails loudly and explains why.
+
+### Verification
+- Ran the app locally with `uvicorn serving.app:app` and hit it with
+  `curl` rather than trusting it compiles — confirmed `/health`,
+  `/predict` (valid input), `/docs` (FastAPI's free auto-generated
+  Swagger UI, another built-in production-awareness signal), and all
+  three error paths above, before calling this phase done.
+- **What `uvicorn` is:** the ASGI server that actually runs a FastAPI
+  app — FastAPI defines routes/handlers, uvicorn is the process that
+  listens on a socket, parses HTTP, and calls into that app. FastAPI
+  by itself isn't runnable; it needs uvicorn (or another ASGI server)
+  underneath it, same relationship as Flask+gunicorn or Django+wsgi.
+
+---
