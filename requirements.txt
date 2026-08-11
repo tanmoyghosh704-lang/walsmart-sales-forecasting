@@ -1,0 +1,31 @@
+# Data / modeling
+pandas
+numpy
+prophet
+scikit-learn
+matplotlib
+seaborn
+
+# Experiment tracking / data versioning
+mlflow
+dvc
+
+# Serving
+fastapi
+uvicorn[standard]
+pydantic
+
+# Orchestration
+apache-airflow
+
+# Monitoring
+prometheus-client
+prometheus-fastapi-instrumentator
+scipy
+
+# Data download
+kaggle
+
+# Dev
+jupyter
+python-dotenv
