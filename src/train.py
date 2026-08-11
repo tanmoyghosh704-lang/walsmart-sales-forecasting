@@ -21,7 +21,10 @@ Design choices, and why:
 
 import logging
 import warnings
+from datetime import datetime
 
+import mlflow
+import mlflow.prophet
 import numpy as np
 import pandas as pd
 from prophet import Prophet
@@ -33,6 +36,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 PROCESSED_DIR = "data/processed"
 RESULTS_DIR = "results"
 TEST_HORIZON = 28
+
+# sqlite backend (not the plain-file default) because MLflow's Model
+# Registry requires a database-backed tracking store -- the file store
+# can log runs/metrics but silently can't register models.
+MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
+MLFLOW_EXPERIMENT = "m5-prophet-forecasting"
 
 
 def train_test_split(long_df: pd.DataFrame):
@@ -59,7 +68,7 @@ def mape(actual: np.ndarray, forecast: np.ndarray) -> float:
 
 
 def fit_and_forecast(series_train: pd.DataFrame, series_test: pd.DataFrame,
-                      holidays: pd.DataFrame) -> np.ndarray:
+                      holidays: pd.DataFrame) -> tuple[Prophet, np.ndarray]:
     train_df = pd.DataFrame({
         "ds": series_train["date"],
         "y": series_train["sales"],
@@ -75,10 +84,14 @@ def fit_and_forecast(series_train: pd.DataFrame, series_test: pd.DataFrame,
         "snap": snap_column(series_test),
     })
     forecast = model.predict(future)
-    return np.clip(forecast["yhat"].to_numpy(), a_min=0, a_max=None)
+    yhat = np.clip(forecast["yhat"].to_numpy(), a_min=0, a_max=None)
+    return model, yhat
 
 
-def main():
+def main(register_models: bool = True):
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
     long_df = pd.read_csv(f"{PROCESSED_DIR}/subset_long.csv", parse_dates=["date"])
     train, test = train_test_split(long_df)
     holidays = build_holidays(long_df)
@@ -89,50 +102,84 @@ def main():
     per_series_rows = []
     all_forecasts = []
 
-    for i, series_id in enumerate(series_ids, 1):
-        s_train = train[train["id"] == series_id].sort_values("date")
-        s_test = test[test["id"] == series_id].sort_values("date")
+    run_name = f"prophet_training_{datetime.now():%Y%m%d_%H%M%S}"
+    with mlflow.start_run(run_name=run_name):
+        mlflow.log_param("n_series", len(series_ids))
+        mlflow.log_param("test_horizon_days", TEST_HORIZON)
+        mlflow.log_param("subset_selection", "top_100_by_volume")
+        mlflow.log_param("train_start", str(train["date"].min().date()))
+        mlflow.log_param("train_end", str(train["date"].max().date()))
+        mlflow.log_param("test_start", str(test["date"].min().date()))
+        mlflow.log_param("test_end", str(test["date"].max().date()))
+        mlflow.log_param("holidays_source", "calendar.event_name_1")
+        mlflow.log_param("n_holiday_events", len(holidays))
+        mlflow.log_param("regressors", "snap")
 
-        yhat = fit_and_forecast(s_train, s_test, holidays)
+        for i, series_id in enumerate(series_ids, 1):
+            s_train = train[train["id"] == series_id].sort_values("date")
+            s_test = test[test["id"] == series_id].sort_values("date")
 
-        actual = s_test["sales"].to_numpy()
-        series_mape = mape(actual, yhat)
-        per_series_rows.append({"id": series_id, "mape": series_mape})
+            with mlflow.start_run(run_name=series_id, nested=True):
+                model, yhat = fit_and_forecast(s_train, s_test, holidays)
 
-        out = s_test[["id", "date", "sales"]].copy()
-        out["forecast"] = yhat
-        all_forecasts.append(out)
+                actual = s_test["sales"].to_numpy()
+                series_mape = mape(actual, yhat)
+                per_series_rows.append({"id": series_id, "mape": series_mape})
 
-        if i % 10 == 0 or i == len(series_ids):
-            print(f"  [{i}/{len(series_ids)}] fitted -- last series MAPE: {series_mape:.1f}%")
+                meta = s_test.iloc[0]
+                mlflow.log_param("series_id", series_id)
+                mlflow.log_param("item_id", meta["item_id"])
+                mlflow.log_param("dept_id", meta["dept_id"])
+                mlflow.log_param("cat_id", meta["cat_id"])
+                mlflow.log_param("store_id", meta["store_id"])
+                mlflow.log_param("state_id", meta["state_id"])
+                mlflow.log_metric("mape", series_mape)
 
-    per_series = pd.DataFrame(per_series_rows)
-    forecasts = pd.concat(all_forecasts, ignore_index=True)
+                mlflow.prophet.log_model(
+                    model,
+                    name="model",
+                    registered_model_name=f"prophet_{series_id}" if register_models else None,
+                )
 
-    mean_per_series_mape = per_series["mape"].mean()
-    daily = forecasts.groupby("date")[["sales", "forecast"]].sum().reset_index()
-    aggregate_mape = mape(daily["sales"].to_numpy(), daily["forecast"].to_numpy())
+            out = s_test[["id", "date", "sales"]].copy()
+            out["forecast"] = yhat
+            all_forecasts.append(out)
 
-    print(f"\nProphet -- Test horizon: {TEST_HORIZON} days")
-    print(f"  Mean per-series MAPE: {mean_per_series_mape:.2f}%")
-    print(f"  Aggregate (summed) MAPE: {aggregate_mape:.2f}%")
+            if i % 10 == 0 or i == len(series_ids):
+                print(f"  [{i}/{len(series_ids)}] fitted -- last series MAPE: {series_mape:.1f}%")
 
-    per_series.to_csv(f"{RESULTS_DIR}/prophet_mape_per_series.csv", index=False)
-    forecasts.to_csv(f"{RESULTS_DIR}/prophet_forecasts.csv", index=False)
-    summary = pd.DataFrame([{
-        "model": "prophet",
-        "mean_per_series_mape": mean_per_series_mape,
-        "aggregate_mape": aggregate_mape,
-        "test_horizon_days": TEST_HORIZON,
-        "n_series": long_df["id"].nunique(),
-    }])
-    summary.to_csv(f"{RESULTS_DIR}/prophet_summary.csv", index=False)
+        per_series = pd.DataFrame(per_series_rows)
+        forecasts = pd.concat(all_forecasts, ignore_index=True)
 
-    baseline_summary = pd.read_csv(f"{RESULTS_DIR}/baseline_summary.csv")
-    comparison = pd.concat([baseline_summary, summary], ignore_index=True)
-    comparison.to_csv(f"{RESULTS_DIR}/model_comparison.csv", index=False)
-    print(f"\nSaved comparison table to {RESULTS_DIR}/model_comparison.csv")
-    print(comparison[["model", "mean_per_series_mape", "aggregate_mape"]])
+        mean_per_series_mape = per_series["mape"].mean()
+        daily = forecasts.groupby("date")[["sales", "forecast"]].sum().reset_index()
+        aggregate_mape = mape(daily["sales"].to_numpy(), daily["forecast"].to_numpy())
+
+        mlflow.log_metric("mean_per_series_mape", mean_per_series_mape)
+        mlflow.log_metric("aggregate_mape", aggregate_mape)
+
+        print(f"\nProphet -- Test horizon: {TEST_HORIZON} days")
+        print(f"  Mean per-series MAPE: {mean_per_series_mape:.2f}%")
+        print(f"  Aggregate (summed) MAPE: {aggregate_mape:.2f}%")
+
+        per_series.to_csv(f"{RESULTS_DIR}/prophet_mape_per_series.csv", index=False)
+        forecasts.to_csv(f"{RESULTS_DIR}/prophet_forecasts.csv", index=False)
+        summary = pd.DataFrame([{
+            "model": "prophet",
+            "mean_per_series_mape": mean_per_series_mape,
+            "aggregate_mape": aggregate_mape,
+            "test_horizon_days": TEST_HORIZON,
+            "n_series": long_df["id"].nunique(),
+        }])
+        summary.to_csv(f"{RESULTS_DIR}/prophet_summary.csv", index=False)
+
+        baseline_summary = pd.read_csv(f"{RESULTS_DIR}/baseline_summary.csv")
+        comparison = pd.concat([baseline_summary, summary], ignore_index=True)
+        comparison.to_csv(f"{RESULTS_DIR}/model_comparison.csv", index=False)
+        mlflow.log_artifact(f"{RESULTS_DIR}/model_comparison.csv")
+
+        print(f"\nSaved comparison table to {RESULTS_DIR}/model_comparison.csv")
+        print(comparison[["model", "mean_per_series_mape", "aggregate_mape"]])
 
 
 if __name__ == "__main__":

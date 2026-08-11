@@ -11,6 +11,7 @@ venv/
 # MLflow
 mlruns/
 mlartifacts/
+mlflow.db
 
 # Airflow
 airflow/logs/

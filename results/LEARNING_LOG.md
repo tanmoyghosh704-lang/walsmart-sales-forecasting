@@ -301,3 +301,104 @@ still open it in Jupyter/VS Code and re-run cells by hand.
   naming as a known scaling limitation if asked.
 
 ---
+
+## Phase 2 — DVC/DagsHub versioning + MLflow tracking/registry
+
+### DVC + DagsHub
+- `dvc init` turns the repo into a DVC project (adds `.dvc/config`,
+  `.dvc/.gitignore`, `.dvcignore`) — analogous to `git init`, but for
+  large-data version control. DVC's core trick: it stores the *actual*
+  large files in a content-addressed cache (keyed by MD5 hash) and
+  commits only a small `.dvc` pointer file (a few lines of YAML/JSON
+  with the hash + size + file count) to git. Git stays fast and small;
+  DVC's remote (here, DagsHub) holds the real bytes.
+- `dvc remote add origin <dagshub-url>.dvc` registers DagsHub as the
+  storage backend. Credentials (username + token) were set with
+  `dvc remote modify origin --local ...` — the `--local` flag writes to
+  `.dvc/config.local` instead of the committed `.dvc/config`, and DVC's
+  own `.dvc/.gitignore` already excludes `config.local` by default. Same
+  "secrets never touch a committed file" pattern as the Kaggle/API-token
+  setup earlier — verified this explicitly (`cat .dvc/.gitignore`) rather
+  than assuming.
+- `dvc add data/raw data/processed` — this is the actual "version this
+  data" step. It hashes the directory contents, moves them into DVC's
+  local cache, and writes `data/raw.dvc` / `data/processed.dvc` pointer
+  files plus a `data/.gitignore` that tells git to ignore the real
+  `raw/`/`processed/` folder contents (git only ever sees the `.dvc`
+  pointer files).
+  - **Difficulty:** this failed the first time with `output 'data\raw'
+    is already tracked by SCM` — because `data/raw/.gitkeep` and
+    `data/processed/.gitkeep` (placeholders from the very first repo
+    scaffolding step) were already committed to git. DVC refuses to
+    take over a directory git already has a stake in. Fixed by
+    `git rm --cached` on the two `.gitkeep` files (they're now
+    redundant anyway — DVC's pointer file keeps the directory
+    "present" in the repo's history without needing a placeholder).
+- `dvc push -r origin` uploaded the actual data (6 files: 5 raw CSVs +
+  1 processed CSV, ~450MB raw) to DagsHub's storage. This is the step
+  that makes data "pushed to DagsHub" true, not just configured.
+- **Bug found and fixed while doing this:** the original `.gitignore`
+  (written in the very first setup step, before any data existed) had a
+  blanket `*.csv` rule intended to stop the *raw M5 data* from being
+  git-tracked. It was too broad — it was silently also excluding
+  `results/*.csv` (the baseline and Prophet MAPE tables from Phases 0-1),
+  so those outputs were sitting in the working directory but never
+  actually entering git history. Caught by reading `git status` closely
+  instead of assuming a big commit succeeded fully. Fixed by removing the
+  blanket rule now that DVC's own auto-generated `data/.gitignore`
+  handles excluding the real data directories precisely.
+- **Also noticed:** a GitHub remote (`origin`) and an earlier commit
+  ("data processing done") already existed in this repo, made directly
+  through VS Code's git UI outside of this working session. Verified via
+  `git show --stat` and `git log` before touching anything, per the
+  general rule of investigating unfamiliar repo state before acting on
+  it — turned out to be the user's own prior commit, not a conflict.
+
+### MLflow tracking + Model Registry
+- **Key gotcha:** MLflow's default tracking store is a flat local
+  `mlruns/` folder (a "file store"). The file store can log runs,
+  params, and metrics fine, but it **cannot support the Model Registry**
+  — registering a model silently requires a database-backed store
+  (SQLite, Postgres, MySQL, etc). Switched the tracking URI to
+  `sqlite:///mlflow.db` specifically to unlock the registry, since the
+  project brief calls out "use the Model Registry specifically, not just
+  experiment tracking."
+- **Run structure:** one parent run per training invocation
+  (`prophet_training_<timestamp>`) logging the shared config (n_series,
+  test horizon, date ranges, holiday source, regressors used) plus the
+  two headline metrics (mean per-series MAPE, aggregate MAPE) — and one
+  **nested run per series** (`mlflow.start_run(..., nested=True)`)
+  logging that series' own params (item/dept/cat/store/state id) and its
+  individual MAPE. This mirrors a real per-entity forecasting setup:
+  parent run = "this training job," child runs = "this one model."
+- **Registry pattern:** registered each series' fitted Prophet model
+  under its *own* registered-model name (`prophet_<series_id>`), via
+  `mlflow.prophet.log_model(model, name="model",
+  registered_model_name=f"prophet_{series_id}")`. This is what makes the
+  Phase 3 FastAPI design work cleanly: given a store-item id, load
+  `models:/prophet_<series_id>/latest` directly — no loose pickle files,
+  no custom lookup table. `mlflow.prophet` is a built-in MLflow "flavor"
+  (like `mlflow.sklearn`, `mlflow.pytorch`) that knows how to
+  serialize/deserialize a Prophet model specifically, so
+  `mlflow.prophet.load_model(...)` hands back a working Prophet object
+  ready to `.predict()`.
+- **Verification before the full run:** rather than firing off the full
+  100-series retrain with untested logging code, first did a throwaway
+  smoke test — fit one tiny Prophet model, log it, register it, then
+  immediately load it back via `models:/.../<version>` and call
+  `.predict()` — to confirm the register→load→predict round trip
+  actually works end to end before spending the ~several minutes on the
+  real run. Caught a deprecation warning this way too (`artifact_path`
+  param renamed to `name` in this MLflow version) and fixed it before
+  the real run instead of after.
+- **Result:** all 100 series registered as 100 distinct MLflow registered
+  models (confirmed via `MlflowClient().search_registered_models()`),
+  each with 1 version so far. MAPE numbers matched the earlier
+  non-MLflow run exactly (68.52% / 6.60%) — expected, since Prophet's
+  fit is deterministic and MLflow only wraps logging around the same
+  computation, it doesn't change it.
+- `mlflow.db` and `mlruns/` (where artifact files like the serialized
+  model actually live, even with a SQLite *metadata* backend) added to
+  `.gitignore` — regenerable from `src/train.py`, shouldn't bloat git.
+
+---
