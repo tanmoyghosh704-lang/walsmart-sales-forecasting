@@ -16,6 +16,7 @@ after evaluation ended, capped at how far the calendar actually extends
 """
 
 import logging
+import os
 from datetime import timedelta
 from functools import lru_cache
 
@@ -25,7 +26,11 @@ from fastapi import FastAPI, HTTPException
 
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 
-MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
+# Env-overridable so the same image works talking to a local dev server
+# (http://127.0.0.1:5000) or, from inside Docker Desktop on Windows/Mac,
+# the host-reachable alias http://host.docker.internal:5000 -- see
+# serving/Dockerfile and README for how this gets set at `docker run` time.
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 CALENDAR_PATH = "data/raw/calendar.csv"
 SUBSET_PATH = "data/processed/subset_long.csv"
 

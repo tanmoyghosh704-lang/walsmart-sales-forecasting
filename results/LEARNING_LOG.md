@@ -463,3 +463,111 @@ still open it in Jupyter/VS Code and re-run cells by hand.
   underneath it, same relationship as Flask+gunicorn or Django+wsgi.
 
 ---
+
+## Phase 4 — Docker (`serving/Dockerfile`, `.dockerignore`)
+
+### Basic setup
+- `serving/requirements.txt` is a **separate, slimmer** dependency list
+  from the root `requirements.txt` (fastapi/uvicorn/mlflow/prophet/
+  pandas/numpy only) — the root file includes Airflow and Jupyter, which
+  have no business in a serving image (bigger image, slower build, and
+  Airflow's dependency tree is fussy enough that it's not worth risking
+  a conflict here for packages the API never imports).
+- `.dockerignore` matters even though the Dockerfile only `COPY`s a
+  handful of specific paths: Docker sends the **entire build context**
+  (everything not excluded) to the daemon before any `COPY` line runs,
+  regardless of what actually gets used. Without excluding `.venv/`
+  (huge), `.git/`, and the 3 large raw M5 CSVs the app doesn't need,
+  every `docker build` would tar up and transfer ~500MB+ for nothing.
+- Built with `docker build -f serving/Dockerfile -t m5-forecast-api .`
+  — note the context is the **repo root** (`.`), not `serving/`, because
+  the Dockerfile needs to reach `data/raw/calendar.csv` etc. from there.
+
+### Problem 1: baked-in MLflow artifacts don't survive the trip into a container
+- First attempt `COPY`d `mlflow.db` and `mlruns/` straight into the
+  image, reasoning "then the container is fully standalone, no external
+  dependency." Built fine, `/health` worked, but `/predict` failed with
+  `No such artifact: ''`.
+- **Root cause, found by inspecting the sqlite DB directly** (not
+  guessing): MLflow's local file-based artifact store records each
+  experiment's `artifact_location` as an **absolute host filesystem
+  path** (`file:///C:/python3_10_11/walsmart sales forecasting/mlruns/1`)
+  at the moment the experiment is first created. That path is baked into
+  the database and is immutable per-experiment. Copying `mlruns/` into
+  `/app/mlruns/` inside a Linux container doesn't help — the DB still
+  says to look for artifacts at the old Windows path, which doesn't
+  exist there.
+- **Real fix, not a workaround:** stood up an actual `mlflow server`
+  process (`mlflow server --backend-store-uri sqlite:///mlflow.db ...`)
+  instead of pointing clients directly at `sqlite:///mlflow.db`. With a
+  tracking server, clients (both `src/train.py` on the host and
+  `serving/app.py` in a container) talk to a **network address**
+  (`MLFLOW_TRACKING_URI=http://...`), and the server — which always runs
+  on the same machine as its own artifact storage — resolves artifact
+  paths locally on its own filesystem. The client never needs to know or
+  care about a filesystem path at all. This is the actual, intended way
+  to run MLflow across more than one machine/environment; local
+  `sqlite:///` + bare `mlruns/` is documented as single-machine-only for
+  exactly this reason.
+  - Wiped the old `mlflow.db`/`mlruns/` (safe — both gitignored, fully
+    regenerable) and reran `src/train.py` against the server to get a
+    fresh, portable experiment.
+  - Reworked `serving/Dockerfile` to stop copying MLflow state into the
+    image entirely; `serving/app.py` now reads `MLFLOW_TRACKING_URI`
+    from an environment variable (default `http://127.0.0.1:5000` for
+    local dev), set at `docker run` time to
+    `http://host.docker.internal:5000` — Docker Desktop's built-in DNS
+    alias for reaching the host machine from inside a container.
+
+### Problem 2: MLflow's server crashed mid-training on a Windows console encoding error
+- Retraining against the new server died after registering exactly 1 of
+  100 models, with `UnicodeEncodeError: 'charmap' codec can't encode
+  character '\U0001f3c3'` (the 🏃 emoji MLflow prints when a run ends).
+- **Root cause:** Windows' default console/stdout encoding is `cp1252`
+  (not UTF-8), which has no representation for that emoji. MLflow's own
+  `_log_url()` doesn't guard the `sys.stdout.write()` call, so this
+  crashes the whole client process, not just a warning.
+  - Confirmed this by counting how many `"Successfully registered
+    model"` lines existed in the log before the crash (exactly 1) rather
+    than assuming the whole run had failed or partially worked.
+- **Fix:** `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`
+  at the top of `src/train.py`, gated on `sys.platform == "win32"`.
+  Forces UTF-8 stdout regardless of the terminal's codepage, which is
+  the standard fix for this entire class of Windows console Unicode
+  issue in Python (also shows up with print statements involving
+  checkmarks, arrows, etc. from other libraries).
+
+### Problem 3: MLflow's DNS-rebinding protection blocked the container
+- With the server fix in place, `/predict` from inside the container
+  still failed: `403 ... 'Invalid Host header - possible DNS rebinding
+  attack detected'`.
+- **What this is:** MLflow 3.x ships built-in protection against DNS
+  rebinding attacks (a browser-based attack where a malicious page
+  tricks your browser into hitting `localhost` services). By default it
+  only accepts requests whose `Host` header matches `localhost`/private
+  IPs. The container's requests arrive with `Host:
+  host.docker.internal:5000`, which isn't on that default allowlist.
+- **Fix:** started the server with
+  `--allowed-hosts "host.docker.internal:5000,127.0.0.1:5000,localhost:5000"`
+  — note the **port had to be included** in each entry; the bare
+  hostname without a port was silently not enough (first attempt with
+  `--allowed-hosts host.docker.internal` alone still 403'd; adding the
+  `:5000`-qualified variant fixed it). Also needed `--host 0.0.0.0` on
+  the server itself so it accepts connections from outside `localhost`
+  in the first place, not just `127.0.0.1`.
+  - This is a legitimate security feature, not something to disable
+    wholesale (`--dev` mode removes all of it) — worth naming as "found
+    a real security control, configured it narrowly for the one
+    legitimate caller, didn't turn it off" if this comes up in an
+    interview.
+
+### Verification
+- Ran the **rebuilt** image standalone (`docker run -p 8001:8000 -e
+  MLFLOW_TRACKING_URI=http://host.docker.internal:5000 ...`) and
+  re-tested everything: `/health`, `/predict` with a real series (numbers
+  matched the non-container run exactly), the unknown-series 404 path,
+  and `/docs`. Didn't call this phase done on "the image built" alone —
+  building was the easy 80%, the artifact-resolution and host-header
+  issues were the part that actually needed debugging.
+
+---

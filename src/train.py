@@ -20,6 +20,7 @@ Design choices, and why:
 """
 
 import logging
+import sys
 import warnings
 from datetime import datetime
 
@@ -29,6 +30,13 @@ import numpy as np
 import pandas as pd
 from prophet import Prophet
 
+# MLflow writes an emoji (run-URL prefix) to stdout when a run ends.
+# Windows' default console encoding (cp1252) can't represent it and
+# raises UnicodeEncodeError, killing the whole script mid-training.
+# Forcing UTF-8 stdout sidesteps it regardless of the terminal's codepage.
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 logging.getLogger("prophet").setLevel(logging.WARNING)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -37,10 +45,16 @@ PROCESSED_DIR = "data/processed"
 RESULTS_DIR = "results"
 TEST_HORIZON = 28
 
-# sqlite backend (not the plain-file default) because MLflow's Model
-# Registry requires a database-backed tracking store -- the file store
-# can log runs/metrics but silently can't register models.
-MLFLOW_TRACKING_URI = "sqlite:///mlflow.db"
+# Points at a real `mlflow server` process (see README), not a raw
+# sqlite:/// URI. Reason: MLflow's local file-based artifact store bakes
+# in an *absolute host filesystem path* as each experiment's artifact
+# location at creation time. That works fine for same-machine use, but
+# breaks the moment a client (e.g. the FastAPI container in serving/)
+# runs anywhere else -- the path simply doesn't exist there. Routing
+# through a tracking server means clients talk to a network address, and
+# the server resolves storage on its own filesystem, which is what makes
+# the setup portable into Docker.
+MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
 MLFLOW_EXPERIMENT = "m5-prophet-forecasting"
 
 

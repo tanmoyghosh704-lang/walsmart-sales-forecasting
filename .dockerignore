@@ -1,0 +1,22 @@
+# Keep the Docker build context small -- only serving/app.py, mlflow.db,
+# mlruns/, and the two small data files it needs actually get COPYd into
+# the image, but *everything not excluded here* still gets sent to the
+# Docker daemon as build context regardless of which COPY lines exist.
+
+.venv/
+.git/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Large raw M5 files serving/app.py doesn't need (only calendar.csv does)
+data/raw/sales_train_evaluation.csv
+data/raw/sales_train_validation.csv
+data/raw/sell_prices.csv
+data/raw/sample_submission.csv
+data/raw/*.zip
+
+notebooks/
+airflow/
+monitoring/
+results/
