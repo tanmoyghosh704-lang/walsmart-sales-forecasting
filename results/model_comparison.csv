@@ -1,0 +1,3 @@
+model,mean_per_series_mape,aggregate_mape,test_horizon_days,n_series
+naive_seasonal_lag7,78.57934321467421,10.754797101949633,28,100
+prophet,68.51649145788971,6.60270046127909,28,100

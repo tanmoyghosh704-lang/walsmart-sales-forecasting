@@ -5,13 +5,8 @@ __pycache__/
 .venv/
 venv/
 
-# Data (DVC-tracked, not git-tracked)
-data/raw/*
-!data/raw/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-*.csv
-*.parquet
+# Data (DVC-tracked via data/.dvc pointer files, not git-tracked directly —
+# see data/.gitignore, auto-managed by `dvc add`)
 
 # MLflow
 mlruns/
