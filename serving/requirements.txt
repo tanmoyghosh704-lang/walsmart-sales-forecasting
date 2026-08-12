@@ -5,3 +5,5 @@ mlflow
 prophet
 pandas
 numpy
+scipy
+prometheus-fastapi-instrumentator

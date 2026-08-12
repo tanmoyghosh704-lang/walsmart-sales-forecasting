@@ -714,3 +714,98 @@ the start rather than a native `pip install apache-airflow`.
   on host) works end to end, not just that the container started.
 
 ---
+
+## Phase 6 — Prometheus + Grafana (`monitoring/`)
+
+Separate `monitoring/docker-compose.yaml` (not merged into the Airflow
+one) so this phase stays independently runnable/verifiable, same
+principle as every earlier phase.
+
+### Request latency + count (`serving/app.py`)
+- `prometheus-fastapi-instrumentator` -- one line
+  (`Instrumentator().instrument(app).expose(app)`) adds a `/metrics`
+  endpoint with request-count and latency-histogram metrics for every
+  route, labeled by handler/method/status, with zero custom
+  instrumentation code. Exactly the "low effort, real signal" the
+  project brief describes -- confirmed by inspecting the raw
+  `/metrics` output for `http_requests_total` and
+  `http_request_duration_seconds_bucket` (the labeled version, as
+  opposed to `..._highr_seconds` which has more buckets but no labels --
+  used the labeled one in Grafana so panels can break down by endpoint).
+
+### Drift metric -- what "drift" means for a forecast-serving API
+- The project brief's drift example (KS-test vs. training distribution)
+  implicitly assumes a live feature-scoring API receiving fresh feature
+  vectors to compare. `/predict` doesn't work that way -- it takes a
+  `series_id` + `horizon`, not a feature vector. Had to translate the
+  concept rather than copy it literally: instead compare the
+  distribution of **recently-served predictions (yhat)** against the
+  **full historical training sales distribution** those models were fit
+  on. If the model starts forecasting values that look statistically
+  different from what it learned, that's the same underlying signal
+  (something's off, worth a look) even though the mechanics differ from
+  a textbook feature-drift check.
+- Implementation: `collections.deque(maxlen=200)` as a rolling window of
+  recent `yhat` values, `scipy.stats.ks_2samp` against the training
+  distribution (`_subset["sales"]`, all 100 series pooled), exposed as
+  two Prometheus `Gauge`s (`prediction_drift_ks_statistic`,
+  `prediction_drift_ks_pvalue`) recomputed on each `/predict` call once
+  the window has >=30 samples.
+- **Observed and worth naming honestly:** querying a single low-volume
+  series repeatedly produced a very high KS statistic (~0.84, p~1e-31)
+  against the pooled 100-series training distribution -- not because
+  anything is wrong, but because one item's typical sales range is
+  naturally narrower than the full catalog's. Mixing traffic across
+  several series brought it down (~0.34) but still statistically
+  "different" by a formal KS test, since even a mixed sample of *recent*
+  short-horizon forecasts is a different shape than five years of full
+  history. This is a real limitation of the pooled-reference-distribution
+  design worth stating plainly in the writeup: the metric is genuinely
+  sensitive (it reacts to real distributional facts), but a
+  production version would want a per-series reference distribution,
+  or a baseline captured over a comparable serving window, not "all
+  historical data across every series" -- otherwise the alarm is
+  always at least mildly triggered by design, which teaches operators to
+  ignore it. Naming a metric's limitation instead of just shipping it is
+  itself worth surfacing in an interview.
+
+### Grafana dashboard
+- Auto-provisioned via two YAML files Grafana reads on startup:
+  `provisioning/datasources/datasource.yml` (points it at the Prometheus
+  container by service name, `http://prometheus:9090` -- Docker Compose's
+  built-in DNS resolves service names automatically within the same
+  compose network, no `host.docker.internal` needed here since both
+  containers are on the same Docker network) and
+  `provisioning/dashboards/dashboard.yml` (tells it to load dashboard
+  JSON files from a mounted folder). This means the dashboard exists the
+  moment the stack starts -- nobody has to click through the UI to
+  recreate it, and it's versioned in git like any other config.
+- Hand-wrote `dashboards/m5-forecasting.json` (6 panels: request rate by
+  endpoint, p95 latency by endpoint, total request count, `/predict`
+  count, drift KS statistic as a gauge with color thresholds, drift
+  p-value as a stat panel) rather than building it in the UI first --
+  faster to iterate on directly as text, and Grafana's dashboard JSON
+  schema is stable enough to write by hand for a panel count this small.
+
+### Verification
+- Didn't stop at "containers started." Checked each layer of the actual
+  data path independently:
+  1. Prometheus's own target-health API
+     (`/api/v1/targets`) -- confirmed `job=m5-forecast-api` status `up`,
+     i.e. Prometheus is actually successfully scraping the app, not just
+     configured to try.
+  2. Generated real `/predict` traffic across 3 different series (15
+     requests, 105 individual predictions) and re-checked `/metrics` --
+     confirmed both the request counters and the drift gauges updated
+     with real numbers, not placeholder zeros.
+  3. Fetched the dashboard definition back via Grafana's own API
+     (`/api/dashboards/uid/m5-forecasting`) to confirm all 6 panels
+     provisioned correctly, not just that the YAML didn't error.
+  4. Queried the drift metric **through Grafana's own datasource proxy**
+     (`/api/datasources/proxy/.../query?query=prediction_drift_ks_statistic`)
+     and confirmed the returned value matched what `/metrics` reported
+     directly -- proof the full chain (app -> Prometheus -> Grafana)
+     carries the same real number end to end, not just that each piece
+     independently "looks fine."
+
+---

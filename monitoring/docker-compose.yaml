@@ -1,0 +1,47 @@
+# Monitoring stack: the FastAPI serving app + Prometheus (scrapes it) +
+# Grafana (visualizes it). Separate from the root docker-compose.yaml
+# (Airflow) so each phase stays independently runnable/verifiable.
+#
+# Note: `build.context: ..` because Compose resolves relative paths
+# against *this file's* directory (monitoring/), not the CWD it's
+# invoked from -- serving/Dockerfile needs the repo root as context to
+# reach data/raw/calendar.csv etc, same as it does when built directly.
+#
+# Usage (run from anywhere, -f makes the compose-relative paths work):
+#   docker compose -f monitoring/docker-compose.yaml up -d --build
+#   Grafana:    http://localhost:3000  (admin / admin)
+#   Prometheus: http://localhost:9090
+#   API:        http://localhost:8000
+
+services:
+  serving-app:
+    build:
+      context: ..
+      dockerfile: serving/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://host.docker.internal:5000
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - serving-app
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
