@@ -1,17 +1,24 @@
 # Build Log — Walmart M5 MLOps Forecasting Project
 
-> **Resume point (end of 2026-08-12 session):** Phases 0-4 complete and
-> pushed to GitHub. Next up is Phase 5 (Airflow), decided to run it via
-> Docker Compose rather than native pip install (Airflow doesn't
-> officially support Windows outside WSL2/Docker).
+> **Status (as of 2026-08-12): all 6 phases complete.** Data → naive
+> baseline → Prophet + MLflow tracking/registry → DVC/DagsHub → FastAPI
+> serving → Docker → Airflow retraining DAG → Prometheus/Grafana
+> monitoring, each independently verified end-to-end. See
+> [`writeup.md`](writeup.md) for the results summary and
+> [`../README.md`](../README.md) for reproduction steps.
 >
-> To pick back up: the local `mlflow server` process from this session
-> will have stopped (it doesn't persist between sessions). Restart it
-> before touching `serving/app.py` or `src/train.py` again:
+> To resume working on this locally: the `mlflow server` process doesn't
+> persist between sessions. Restart it before touching `serving/app.py`
+> or `src/train.py`:
 > `mlflow server --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0
 > --allowed-hosts "host.docker.internal:5000,127.0.0.1:5000,localhost:5000"`
 > — the registered models and run history are still there in `mlflow.db`
 > (gitignored but still on disk locally), nothing needs retraining.
+>
+> Natural next steps if extending this further: multi-task Airflow DAG
+> with validation + conditional model promotion, per-series drift
+> reference distributions (see Phase 6's honest limitation note), and
+> per-series Prophet hyperparameter tuning.
 
 Running log of what we did, which tool it involved, why we did it, and any
 difficulties hit along the way. Written to be re-read before an interview.
