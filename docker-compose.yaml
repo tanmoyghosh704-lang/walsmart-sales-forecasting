@@ -1,0 +1,77 @@
+# Minimal Airflow stack: LocalExecutor (webserver + scheduler + Postgres),
+# not the official docker-compose.yaml's default CeleryExecutor setup
+# (which adds Redis + a separate worker + triggerer -- 6+ containers).
+# LocalExecutor runs tasks inside the scheduler process itself, which is
+# plenty for a single-task retraining DAG on a local machine.
+#
+# Usage:
+#   docker compose up airflow-init   # one-off: migrate DB, create admin user
+#   docker compose up -d             # start webserver + scheduler
+#   http://localhost:8080  (user: airflow / pass: airflow)
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "m5-local-dev-secret-key"
+    # Reaches the host-side `mlflow server` from inside the container
+    # (see results/LEARNING_LOG.md Phase 4 for why a tracking server,
+    # not a raw sqlite path, is required here).
+    MLFLOW_TRACKING_URI: http://host.docker.internal:5000
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./src:/opt/airflow/project/src
+    - ./data:/opt/airflow/project/data
+    - ./results:/opt/airflow/project/results
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow --password airflow \
+          --firstname Air --lastname Flow \
+          --role Admin --email airflow@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+volumes:
+  postgres-db-volume:

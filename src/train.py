@@ -20,6 +20,7 @@ Design choices, and why:
 """
 
 import logging
+import os
 import sys
 import warnings
 from datetime import datetime
@@ -54,7 +55,11 @@ TEST_HORIZON = 28
 # through a tracking server means clients talk to a network address, and
 # the server resolves storage on its own filesystem, which is what makes
 # the setup portable into Docker.
-MLFLOW_TRACKING_URI = "http://127.0.0.1:5000"
+#
+# Env-overridable (see serving/app.py for the same pattern) -- the
+# Airflow DAG's container sets this to http://host.docker.internal:5000
+# via docker-compose.yaml; local/host runs fall back to 127.0.0.1.
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_EXPERIMENT = "m5-prophet-forecasting"
 
 

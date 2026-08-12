@@ -17,6 +17,6 @@ data/raw/sample_submission.csv
 data/raw/*.zip
 
 notebooks/
-airflow/
+airflow/logs/
 monitoring/
 results/

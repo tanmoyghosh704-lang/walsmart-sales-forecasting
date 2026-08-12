@@ -584,3 +584,133 @@ still open it in Jupyter/VS Code and re-run cells by hand.
   issues were the part that actually needed debugging.
 
 ---
+
+## Phase 5 — Airflow (`docker-compose.yaml`, `airflow/`)
+
+Airflow doesn't officially support running natively on Windows (only
+Linux, or Windows via WSL2/Docker), so this ran via Docker Compose from
+the start rather than a native `pip install apache-airflow`.
+
+### LocalExecutor instead of the official CeleryExecutor setup
+- Apache's official `docker-compose.yaml` defaults to `CeleryExecutor`:
+  webserver + scheduler + a separate worker + triggerer + Redis +
+  Postgres (6+ containers). That's real infrastructure for running many
+  concurrent tasks across distributed workers — overkill for "get a
+  single-task DAG working," which is explicitly how the project doc says
+  to start.
+- Built a slimmer stack instead: Postgres (Airflow's metadata DB, not to
+  be confused with the MLflow tracking server) + webserver + scheduler,
+  using `LocalExecutor` (tasks run as subprocesses of the scheduler
+  process itself, no separate worker needed). Fewer moving parts, same
+  DAG-authoring experience -- worth being able to name explicitly *why*
+  this is a legitimate simplification and not just "skipped the real
+  thing," if asked.
+
+### Problem 1: `.dockerignore` silently broke the Airflow image build
+- First `docker compose build` failed: `COPY airflow/requirements.txt
+  /requirements.txt` — file not found in build context.
+- Root cause: Phase 4's `.dockerignore` excluded the entire `airflow/`
+  folder (reasonable at the time — the FastAPI image had no use for it).
+  Since Docker Compose builds from the same repo-root context, that
+  exclusion silently applied here too. Fixed by narrowing the ignore
+  rule to just `airflow/logs/` (runtime-generated, shouldn't be sent as
+  build context) instead of the whole directory.
+
+### Problem 2: Airflow's own dependency constraints conflict with mlflow/prophet
+- Following the officially recommended pattern
+  (`pip install -r requirements.txt --constraint <airflow-constraints-url>`)
+  to add prophet/mlflow/pandas into the Airflow image failed twice in a
+  row with `ResolutionImpossible` — first over `pandas` (constraint
+  pinned `2.1.4`, our requirements.txt hard-pinned `2.3.3`), then again
+  over `cryptography` after loosening the pandas pin.
+- Rather than chase an ever-moving conflict pinning one package at a
+  time, switched approach: installed prophet/mlflow/pandas/numpy into an
+  **isolated venv** (`/opt/airflow/task_venv`) inside the image, entirely
+  separate from Airflow's own Python environment. Nothing installed
+  there can ever break Airflow's packages, because they don't share an
+  environment. The DAG's `BashOperator` invokes
+  `/opt/airflow/task_venv/bin/python src/train.py` directly instead of
+  the system `python`. Clean build on the first try afterward.
+
+### Problem 3: `catchup=False` still ran one extra, concurrent DAG run
+- On unpausing the DAG, Airflow started **two** runs at once: the manual
+  trigger, and an automatic `scheduled__2026-08-02...` run. `catchup=False`
+  stops Airflow from backfilling *every* missed interval since
+  `start_date`, but it still runs the single most recent past interval
+  on activation — a real, slightly surprising Airflow default worth
+  knowing before it causes confusing double-execution during testing.
+  Not a bug in this DAG; just something to expect.
+
+### Problem 4: the real bug — hardcoded `MLFLOW_TRACKING_URI`, and how it was actually found
+- Both concurrent runs failed after ~4 minutes. This took a long,
+  methodical debugging pass to pin down, and the process is worth
+  recording as much as the fix:
+  1. **First (wrong) hypothesis: it's hung.** `docker stats` showed ~3%
+     CPU on the scheduler container — far below what 100 concurrent
+     Prophet/Stan fits should consume — which looked like a stall.
+  2. Tested every piece of `train.py` in isolation directly inside the
+     container via `docker compose exec`: `mlflow.set_experiment`
+     (0.3s), a bare `Prophet().fit()` (0.1s), reading the real
+     `subset_long.csv` over the Docker bind mount (0.5s), the full
+     `fit_and_forecast` with holidays + the snap regressor (0.4s), even
+     `mlflow.prophet.log_model(..., registered_model_name=...)` with the
+     nested parent/child run structure `main()` uses. **Every single
+     piece worked, fast, no hang.** This was genuinely confusing — if
+     every component works, why does the whole script not?
+  3. **Second (also wrong) hypothesis: stdout buffering.** Python fully
+     buffers stdout when it's not a TTY (as under a subprocess pipe),
+     while the `logging`-module lines from cmdstanpy/mlflow flush
+     immediately — which explained why we saw "Importing plotly failed"
+     but none of `train.py`'s own `print()` progress lines. Reasonable
+     theory, but didn't explain everything on its own.
+  4. **The actual breakthrough:** stopped trusting `stdout` entirely and
+     queried the MLflow tracking server directly —
+     `mlflow.search_runs(experiment_names=[...])` — to check whether any
+     of the 100 expected nested child runs actually existed. Zero did,
+     after 15+ minutes. That's a real network-visible fact, immune to
+     any local buffering theory, and it proved the process wasn't just
+     "slow to log" — no work was happening at all.
+  5. Went back to the **full** task log (not just the tail) once the run
+     had actually failed (Airflow's `list-runs` had been showing `running`
+     because I kept checking mid-retry-backoff, not because it was stuck
+     forever) — and the real error was sitting there the whole time:
+     `HTTPConnectionPool(host='127.0.0.1', port=5000): ... Connection
+     refused`.
+  6. **Root cause:** `src/train.py`'s `MLFLOW_TRACKING_URI` was a
+     **hardcoded string constant** (`"http://127.0.0.1:5000"`), left over
+     from Phase 4's fix. Only `serving/app.py` had been updated to read
+     it from an environment variable — I never applied the same change
+     to `train.py`. So no matter what `MLFLOW_TRACKING_URI` the
+     `docker-compose.yaml` environment block set, the script ignored it
+     and always tried `127.0.0.1` — which is the *container itself*
+     inside Docker, not the host machine. Every one of my manual
+     debugging tests had "worked" only because each one explicitly
+     called `mlflow.set_tracking_uri('http://host.docker.internal:5000')`
+     by hand — I had never actually run the unmodified script itself
+     inside the container until the DAG did it for me.
+  7. Fix: made `MLFLOW_TRACKING_URI` in `train.py` read from
+     `os.environ.get(...)`, matching the pattern already used in
+     `serving/app.py`, with `docker-compose.yaml` setting it to
+     `http://host.docker.internal:5000` for the Airflow containers.
+     Since `src/` is bind-mounted (not baked into the image), the fix
+     applied immediately without a rebuild.
+- **Lesson worth remembering:** isolated tests that each explicitly
+  hardcode the "correct" value can all pass while the actual
+  unmodified code path still fails — because the isolated tests never
+  exercised the exact configuration surface (an environment variable
+  silently not being read) that the real script depends on. The fix was
+  found by checking observable server-side state (real network fact)
+  over trusting either "it looks hung" or "my simplified reproduction
+  passed," and by reading the complete log rather than a tail snippet.
+
+### Verification
+- After the fix, triggered a fresh run: **succeeded in 1m38s** for all
+  100 series (real nested MLflow runs appearing at roughly 1/second,
+  confirmed via `mlflow.search_runs` mid-run rather than assumed).
+  Final MAPE: 68.58% / 6.57% (matches earlier runs within Prophet's
+  normal fit-to-fit variance) — `results/model_comparison.csv` was
+  correctly written back to the host through the bind mount, proving the
+  full loop (container → training → MLflow registry → results file back
+  on host) works end to end, not just that the container started.
+
+---

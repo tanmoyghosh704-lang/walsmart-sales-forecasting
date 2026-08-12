@@ -1,2 +1,2 @@
 model,mean_per_series_mape,aggregate_mape,test_horizon_days,n_series
-prophet,68.51649145788971,6.60270046127909,28,100
+prophet,68.57751942568424,6.574298747350994,28,100
