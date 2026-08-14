@@ -2,7 +2,7 @@
   "title": "M5 Forecasting API",
   "uid": "m5-forecasting",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
@@ -12,7 +12,6 @@
       "title": "Request rate by endpoint (req/s)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [
         {
           "expr": "sum(rate(http_requests_total[1m])) by (handler)",
@@ -25,7 +24,6 @@
       "title": "p95 latency by endpoint",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
         {
@@ -39,7 +37,6 @@
       "title": "Total requests served",
       "type": "stat",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [{ "expr": "sum(http_requests_total)" }]
     },
     {
@@ -47,7 +44,6 @@
       "title": "/predict request count",
       "type": "stat",
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "targets": [{ "expr": "sum(http_requests_total{handler=\"/predict\"})" }]
     },
     {
@@ -56,7 +52,6 @@
       "description": "Two-sample KS test comparing recently-served predictions against the training sales distribution. Higher = more different from training data. See serving/app.py for methodology.",
       "type": "gauge",
       "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": {
         "defaults": {
           "min": 0,
@@ -80,7 +75,6 @@
       "description": "Low p-value = statistically significant difference between recent predictions and training distribution.",
       "type": "stat",
       "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "$datasource" },
       "fieldConfig": {
         "defaults": {
           "min": 0,
@@ -98,15 +92,5 @@
       },
       "targets": [{ "expr": "prediction_drift_ks_pvalue" }]
     }
-  ],
-  "templating": {
-    "list": [
-      {
-        "name": "datasource",
-        "type": "datasource",
-        "query": "prometheus",
-        "current": {}
-      }
-    ]
-  }
+  ]
 }
