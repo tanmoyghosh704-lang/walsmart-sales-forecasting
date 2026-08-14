@@ -3,8 +3,16 @@ pandas
 numpy
 prophet
 scikit-learn
+lightgbm
+xgboost
+statsmodels
+pmdarima
 matplotlib
 seaborn
+plotly
+
+# UI
+streamlit
 
 # Experiment tracking / data versioning
 mlflow

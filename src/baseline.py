@@ -80,6 +80,9 @@ def main():
     print(f"  Aggregate (summed) MAPE: {aggregate_mape:.2f}%")
 
     per_series.to_csv(f"{RESULTS_DIR}/baseline_mape_per_series.csv", index=False)
+    result[["id", "date", "sales", "forecast"]].to_csv(
+        f"{RESULTS_DIR}/baseline_forecasts.csv", index=False
+    )
     summary = pd.DataFrame([{
         "model": "naive_seasonal_lag7",
         "mean_per_series_mape": per_series_mape,

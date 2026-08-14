@@ -816,3 +816,173 @@ principle as every earlier phase.
      independently "looks fine."
 
 ---
+
+## Phase 7 — Full model comparison (ARIMA, Linear Regression, Random
+## Forest, XGBoost, LightGBM) + champion registration + Streamlit UI
+
+After the original 6-phase pipeline was complete, decided to turn this
+into a fuller data-science portfolio piece: compare Prophet against
+classical (ARIMA) and traditional ML (Linear Regression, Random Forest,
+XGBoost, LightGBM) approaches on the same held-out window, register
+whichever wins as an MLflow "champion," and build a Streamlit UI to
+explore the comparison. Also dropped Prophet as the CV headline (kept it
+in the pipeline, since it's a legitimate comparison point) in favor of
+whichever model actually won -- you shouldn't put a tool on a CV you
+can't defend in an interview.
+
+### Global vs. per-series -- the key design fork
+- Prophet and ARIMA are inherently **per-series**: each fits only on one
+  series' own history, with no natural way to see other series at all.
+- Linear Regression, Random Forest, XGBoost, and LightGBM were instead
+  trained as **one global model each**, on all 100 series stacked into a
+  single table with `store_id`/`item_id`/`dept_id`/`cat_id`/`state_id` as
+  features. This is how the real M5 competition's top solutions actually
+  approached the problem (not a shortcut) -- it lets the model learn
+  cross-series patterns ("TX stores sell more," "FOODS_3 spikes on
+  weekends") that a per-series model structurally cannot see, and it
+  means 4 models total instead of 400.
+
+### Feature engineering for the global models
+  (`src/feature_engineering.py`)
+- **Leakage constraint, and why `lag_28` specifically:** this is a
+  28-day-*ahead* forecast, not a 1-day-ahead rolling one. A `lag_7`
+  feature would be invalid for most of the test window -- predicting day
+  15 of the horizon with "sales 7 days ago" requires knowing sales from
+  day 8 of the horizon, which hasn't happened yet at forecast time.
+  `lag_28` is the largest lag that stays valid for *every* day across the
+  full 28-day horizon (lag_28 on the last test day still points at the
+  last training day). Every history-based feature -- the lag itself,
+  plus 7-/28-day rolling mean/std computed on top of the lag-28-shifted
+  series -- is built on this constraint. This mirrors how top M5
+  competition solutions actually handled the exact same problem, not an
+  invented workaround.
+- Also joined `sell_prices.csv` (never used by the Prophet/ARIMA phase)
+  on `(store_id, item_id, wm_yr_wk)`, and encoded categoricals two ways:
+  integer/label codes for the tree models (fine -- trees split on
+  thresholds regardless of encoding), one-hot for Linear Regression via
+  a `ColumnTransformer` (label codes would wrongly imply an ordering a
+  linear model would try to use).
+- 5,500 rows (100 series x 55 days) dropped for insufficient lag_28
+  history at the start of each series -- same shape as the earlier
+  Prophet-training row-count math, a good sanity check that the join/
+  shift logic was right before training anything on it.
+
+### Training the 4 global models (`src/train_ml_models.py`)
+- Straightforward compared to Prophet/ARIMA: one `.fit()` / `.predict()`
+  call each (no per-series loop), so one MLflow run per model (not
+  nested runs). Registered each under its own name (`sales_linear_
+  regression`, `sales_random_forest`, `sales_xgboost`, `sales_lightgbm`).
+- LightGBM given true categorical columns (`categorical_feature=`,
+  values cast to pandas `category` dtype) rather than raw integer codes,
+  for better split quality than the label-encoded columns RF/XGBoost got
+  -- a deliberate difference, not an oversight.
+- Deliberately no hyperparameter tuning (sensible defaults only) -- per
+  this project's own stated goal, the comparison and pipeline are the
+  point, not squeezing out the last percent of MAPE.
+
+### Training ARIMA (`src/train_arima.py`)
+- Per-series SARIMA (`pmdarima.auto_arima`, seasonal period 7 to match
+  the weekly seasonality EDA found), with `snap` passed as an exogenous
+  regressor -- same reasoning as Prophet's `add_regressor`.
+- **Runtime problem and fix:** a single `auto_arima` call took ~35s
+  (measured directly before committing to all 100). Sequential, that's
+  ~1hr+. Since each series' fit is fully independent, parallelized with
+  `joblib.Parallel(n_jobs=-1)` across all 12 available CPU cores --
+  fitting dropped to a few minutes. MLflow logging stayed sequential in
+  the main process afterward (concurrent writers to nested runs across
+  separate processes is asking for trouble), so the real wall-clock cost
+  became parallel-fit-time + sequential-log-time, not
+  parallel-fit-time alone.
+
+### A genuine, surprising result: ARIMA scored *worse than the naive
+### baseline* on mean per-series MAPE -- investigated before reporting it
+- First result: ARIMA's mean per-series MAPE was 85.2% (worse than
+  naive's 78.6%) and aggregate MAPE 18.5% (worse than naive's 10.75% and
+  every other model's). Rather than accept "ARIMA is just bad here" at
+  face value or quietly drop the result, checked whether this was a real
+  finding or a bug:
+  1. Pulled the per-series MAPE distribution: mean 85.2%, but **median
+     43.9%**, std 139.5, max **856%**. A distribution whose std exceeds
+     its mean is a strong tell that a few extreme outliers are doing the
+     damage, not a broad, even weakness.
+  2. Traced the single worst series (`FOODS_3_808_CA_3_validation`,
+     856% MAPE) back to its actual raw data: steady ~20-57 units/day
+     through training, then a collapse to almost entirely zero for most
+     of the 28-day test window -- a real stockout or discontinuation,
+     invisible in training history, that *no* history-only model could
+     have anticipated.
+  3. Confirmed ARIMA's selected order for that series
+     (`(2,1,2)(1,0,0,7)`) via `search_runs` -- it extrapolated the
+     pre-collapse trend forward as expected. Because MAPE divides by the
+     (now near-zero) actual value, an ordinary absolute miss on the
+     handful of remaining non-zero test days turned into a triple-digit
+     percentage error that, averaged into a 100-series mean, dragged the
+     whole model below the naive baseline.
+- **This is not a bug -- it's the same MAPE small-denominator problem
+  already documented in Phase 0**, now demonstrated with a concrete,
+  traced-through example instead of an abstract caveat. Reported
+  honestly rather than hidden, and it directly motivated the next
+  decision.
+
+### Champion selection: aggregate MAPE, not mean per-series MAPE -- and why
+- The ARIMA finding is exactly why **aggregate MAPE was used as the
+  model-*selection* metric**, not mean per-series MAPE: a selection
+  metric that lets one pathological series disqualify an otherwise-
+  reasonable model is a bad selection metric, even though that same
+  per-series number is still worth reporting for transparency (which
+  `results/full_model_comparison.csv` and the Streamlit UI both do).
+- `src/compare_models.py` assembles every model's summary + per-series
+  files into one table, sorted by aggregate MAPE. **LightGBM won**
+  (5.82% aggregate MAPE, beating Prophet's 6.57%).
+- Registered the champion via MLflow's **alias** mechanism (not the
+  older, now-deprecated "stage" concept):
+  `client.set_registered_model_alias("sales_lightgbm", "champion",
+  version)`. Verified by loading it back through the alias URI
+  (`models:/sales_lightgbm@champion`) rather than assuming the call
+  succeeded -- same "verify, don't assume" habit as every earlier phase.
+  Had to re-point the alias after later reruns bumped the model to v2,
+  then v3 -- a real reminder that an alias needs to be re-set after every
+  retrain, it doesn't follow "whatever is newest" automatically.
+
+### Streamlit UI (`ui/app.py`)
+- Two tabs: a **per-series backtest view** (actual sales history +
+  test-window predictions from any subset of the 7 models, overlaid on
+  one Plotly chart, with that series' own MAPE per model) and an
+  **overall comparison view** (the full aggregate-MAPE table + bar
+  chart, with the champion called out).
+- **Deliberately visualizes pre-computed backtest results, not live
+  future forecasts.** The champion (LightGBM) is a global model that
+  needs the full engineered feature set (lag_28, rolling stats, price,
+  calendar) to score a new row -- building that feature pipeline live
+  for arbitrary future dates is a meaningfully different, larger piece of
+  work than a comparison demo needs. What's actually useful to show is
+  "how did each approach do on the same held-out window," which the
+  existing `results/*_forecasts.csv` files already answer directly.
+  Named this as a deliberate scope decision (in both the code's
+  docstring and `results/writeup.md`), not silently limited it.
+- Required adding row-level forecast CSV exports
+  (`results/{model}_forecasts.csv`, `id`/`date`/`sales`/`forecast`) to
+  `baseline.py`, `train_arima.py`, and `train_ml_models.py` -- only
+  Prophet had saved these already from Phase 1. Reran all three after
+  adding the export lines (ARIMA's ~15-20 min rerun was the expensive
+  one, parallelized fitting again).
+- Verified past "the server responds": loaded every CSV the app depends
+  on directly (bypassing Streamlit's caching layer) to confirm shapes
+  and columns before trusting the UI, then hit the running app with
+  `curl` and grepped its log for tracebacks after triggering a real page
+  load -- the same "check the actual data path, not just that a process
+  started" habit used throughout this project.
+
+### Final comparison
+
+| model | mean per-series MAPE | median per-series MAPE | aggregate MAPE |
+|---|---|---|---|
+| **lightgbm** | 73.45% | 33.60% | **5.82%** |
+| linear_regression | 80.73% | 36.09% | 6.45% |
+| xgboost | 74.71% | 33.55% | 6.48% |
+| prophet | 68.58% | 33.83% | 6.57% |
+| random_forest | 87.17% | 32.79% | 7.29% |
+| naive_seasonal_lag7 | 78.58% | 40.86% | 10.75% |
+| arima | 85.21% | 43.87% | 18.46% |
+
+---

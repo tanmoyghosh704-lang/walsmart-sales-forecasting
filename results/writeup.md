@@ -34,44 +34,108 @@ are scoped to fast-moving grocery-adjacent items.
 
 1. **Naive baseline first**, before any modeling: a seasonal-naive
    forecast (each series' last 7 observed training days, tiled across
-   the 28-day test horizon). This is the free lunch any real model has
+   the 28-day test horizon). This is the free lunch every real model has
    to beat to justify its complexity.
 2. **EDA** on the subset: confirmed real weekly seasonality (weekend
    sales ~40 units/day vs. ~28 midweek), a genuine and consistent SNAP
    (food-assistance) effect across all three states, and — a bit
    surprisingly — a negligible calendar-holiday effect for this
    particular FOODS-heavy subset.
-3. **Prophet**, one model per series (100 total), trained on data through
-   2016-03-27 and evaluated on the following 28 days (2016-03-28 to
-   2016-04-24), matching M5's own competition horizon. Fed two features
-   based on what EDA actually found, not just what the source data
-   offered: calendar events via Prophet's native `holidays` parameter,
-   and SNAP eligibility as an `add_regressor` (a real signal, and its
-   future values are a published schedule, not something that has to be
-   forecast).
-4. **MAPE** computed two ways per model, since MAPE is highly sensitive
-   to small actuals: mean per-series MAPE (excluding zero-actual rows),
-   and an aggregate MAPE on total daily sales summed across all 100
-   series (where near-zero days are rare, making it a more stable
-   number).
+3. **Seven forecasting approaches**, compared head-to-head on the same
+   28-day held-out window (2016-03-28 to 2016-04-24):
+   - **Naive** (seasonal lag-7) and **Prophet** — per-series models (100
+     each), described above; Prophet fed calendar holidays natively and
+     SNAP as an `add_regressor`.
+   - **ARIMA** (SARIMA, seasonal period 7) — also per-series (100 models,
+     via `pmdarima.auto_arima`), since ARIMA has no natural "global
+     across series" form. SNAP passed as an exogenous regressor, same
+     reasoning as Prophet. Order search parallelized across all CPU
+     cores (independent per-series fits), since a single `auto_arima`
+     call took ~35s and 100 sequential fits would have been prohibitive.
+   - **Linear Regression, Random Forest, XGBoost, LightGBM** — *global*
+     models: one model each, trained on all 100 series stacked into a
+     single table, with `store_id`/`item_id`/`dept_id`/`cat_id`/
+     `state_id` as features rather than 100 separate fits. This mirrors
+     how the real M5 competition's top solutions approached the problem,
+     and lets the model learn cross-series patterns a per-series
+     approach never sees. Categoricals were one-hot encoded for Linear
+     Regression (ordinal codes would wrongly imply an order to a linear
+     model) and passed as native categorical features to LightGBM (for
+     better split quality); Random Forest and XGBoost used label-encoded
+     integer codes, a standard simplification for tree models.
+4. **Feature engineering for the global models**
+   (`src/feature_engineering.py`) — the one piece of new methodology
+   this comparison required. Key design constraint: this is a 28-day-
+   *ahead* forecast, not a 1-day-ahead rolling one, so a naive `lag_7`
+   feature would be invalid for most of the test window (predicting day
+   15 of the horizon with "sales 7 days ago" would require knowing sales
+   from day 8 of the horizon, which hasn't happened yet). Every
+   history-based feature is instead built on **`lag_28`** — the largest
+   lag that stays valid for the *entire* 28-day horizon, since lag_28 on
+   the last test day still points at the last training day. On top of
+   that: 7- and 28-day rolling mean/std (computed on the lag_28-shifted
+   series), calendar features (weekday, month, is-weekend, SNAP,
+   has-event), and `sell_price` (joined from `sell_prices.csv`, not used
+   at all by the Prophet/ARIMA phase of this project).
+5. **MAPE** computed three ways per model, since MAPE is highly
+   sensitive to small actuals (see the ARIMA finding below for a
+   concrete example of why a third framing was added): mean per-series
+   MAPE, **median** per-series MAPE, and aggregate MAPE on total daily
+   sales summed across all 100 series.
+6. **Champion selection**: the model with the lowest **aggregate MAPE**
+   is registered under an MLflow Model Registry alias, `champion` — see
+   "A finding worth stating plainly" below for why aggregate MAPE, not
+   mean per-series MAPE, was chosen as the selection metric.
 
 ## Results
 
-| Model | Mean per-series MAPE | Aggregate MAPE |
-|---|---|---|
-| Naive (seasonal, lag-7) | 78.58% | 10.75% |
-| **Prophet** | **68.58%** | **6.57%** |
-| Relative improvement | **12.7%** | **38.9%** |
+| Model | Mean per-series MAPE | Median per-series MAPE | Aggregate MAPE |
+|---|---|---|---|
+| **LightGBM** 🏆 | 73.45% | 33.60% | **5.82%** |
+| Linear Regression | 80.73% | 36.09% | 6.45% |
+| XGBoost | 74.71% | 33.55% | 6.48% |
+| Prophet | 68.58% | 33.83% | 6.57% |
+| Random Forest | 87.17% | 32.79% | 7.29% |
+| Naive (seasonal lag-7) | 78.58% | 40.86% | 10.75% |
+| ARIMA | 85.21% | 43.87% | 18.46% |
 
-Prophet beats the naive baseline on both framings, with a much larger
-gap at the aggregate level. That's expected: Prophet explicitly models
-trend and seasonality (the *shape* of the curve over time), which shows
-up clearly once per-series noise is summed away — but per-series MAPE
-stays noisier regardless of model quality, since a single bad day on a
-low-volume series can still dominate that series' own MAPE. Both numbers
-are reported deliberately, rather than leading with whichever looks
-better: the per-series number is the more honest one if the real use
-case is "forecast this specific item at this specific store."
+**Champion: LightGBM**, registered in the MLflow Model Registry as
+`sales_lightgbm` with alias `champion` — 45.8% relative aggregate-MAPE
+improvement over the naive baseline, and the best aggregate MAPE of any
+approach tried, including Prophet.
+
+Every model except ARIMA beats the naive baseline on aggregate MAPE; all
+four global ML models land within a tight band of each other (5.8–7.3%),
+with LightGBM and XGBoost — the two models best suited to tabular data
+with mixed categorical/numeric features — coming out on top, as expected
+given the M5 competition's own history.
+
+### A finding worth stating plainly: why ARIMA lost, and why the selection metric matters
+
+ARIMA's **mean** per-series MAPE (85.2%) makes it look like the worst
+model by a wide margin — worse than the naive baseline. Investigating
+before accepting that at face value: the per-series MAPE distribution
+has a median of 43.9% (a much more ordinary result) but a maximum of
+**856%**, driven by a single series (`FOODS_3_808_CA_3_validation`)
+whose actual sales collapsed from a steady ~20-50 units/day to almost
+entirely zero partway through the test window — a real-world stockout or
+discontinuation that's invisible in training history and that *no*
+history-only model could have anticipated. ARIMA extrapolated the recent
+trend forward as usual; because MAPE divides by the (now near-zero)
+actual value, a moderate absolute error on the few remaining non-zero
+days turned into an enormous percentage error, single-handedly dragging
+the whole model's mean per-series MAPE above the naive baseline's.
+
+ARIMA's **aggregate** MAPE (18.5%) is unaffected by this one series in
+the same catastrophic way, and is a more trustworthy read: ARIMA is
+still the weakest of the seven approaches here, but not the naive-
+baseline-losing failure the mean per-series number alone would suggest.
+This is exactly why **aggregate MAPE was used as the model-selection
+metric** for choosing the registered champion, not mean per-series MAPE
+— a single pathological series shouldn't be able to disqualify an
+otherwise-reasonable model, and a metric that lets one data point do that
+is a bad metric to select on, even if it's still worth reporting
+alongside the others.
 
 ## Architecture
 
@@ -84,21 +148,33 @@ data/raw/  --[DVC]-->  DagsHub (data versioning)
       v
 src/data_prep.py  -->  data/processed/subset_long.csv (100 series, long format)
       |
+      +--> src/baseline.py            --> naive MAPE reference
+      +--> src/train.py               --> Prophet x100          (per-series)
+      +--> src/train_arima.py         --> SARIMA x100            (per-series, parallelized)
+      +--> src/feature_engineering.py --> data/processed/ml_features.csv (lag_28-based, leakage-safe)
+             |
+             +--> src/train_ml_models.py --> LinReg / RF / XGBoost / LightGBM (global, 1 model each)
+      |
       v
-src/baseline.py  -->  naive MAPE reference
-src/train.py     -->  Prophet x100, logged + registered via MLflow
-      |                (tracking server, SQLite backend + local artifact store)
+  all 7 approaches logged + registered via MLflow
+      (tracking server, SQLite backend + local artifact store)
+      |
       v
-MLflow Model Registry  <---------------------+
-      |                                       |
-      v                                       |
-serving/app.py (FastAPI)  ---[Docker]---> served predictions
-      |                                       |
-      v                                       |
+src/compare_models.py --> results/full_model_comparison.csv
+      |                   champion selected on aggregate MAPE
+      v
+MLflow Model Registry: sales_lightgbm@champion  <-------------+
+      |                                                       |
+      v                                                       |
+serving/app.py (FastAPI, Prophet)  ---[Docker]---> served predictions
+      |                                                       |
+      v                                                       |
 Prometheus (/metrics: latency, request count, prediction drift)
       |
       v
 Grafana (auto-provisioned dashboard)
+
+ui/app.py (Streamlit) --> per-series + overall backtest comparison across all 7 models
 
 airflow/dags/retrain_dag.py  --[Docker Compose, LocalExecutor]-->
       weekly-scheduled re-run of src/train.py
@@ -107,6 +183,15 @@ airflow/dags/retrain_dag.py  --[Docker Compose, LocalExecutor]-->
 Each stage was verified independently and end-to-end (not just "the
 container started") before moving to the next — see `LEARNING_LOG.md`
 for the specific checks run at each phase.
+
+Note: `serving/app.py` (the FastAPI /predict endpoint) still serves
+Prophet specifically, not the LightGBM champion — LightGBM is a *global*
+model that needs the full engineered feature set (lag_28, rolling stats,
+price, calendar) to score a new row, which is a meaningfully different
+serving problem than Prophet's "give it a date + snap flag." The
+Streamlit UI (`ui/app.py`) is where the champion model and every other
+approach are actually compared, via pre-computed backtest results rather
+than live inference — see that file's docstring for the reasoning.
 
 ## What's intentionally out of scope
 
@@ -126,13 +211,26 @@ for the specific checks run at each phase.
   it's also somewhat inflated by design (a diverse traffic mix will
   always look "different" from any single series' typical range). A
   production version would want a per-series or per-cohort baseline.
-- **No per-series hyperparameter tuning.** All 100 Prophet models use
-  the same default configuration (plus the holidays/SNAP features found
-  during EDA). Tuning changepoint priors or seasonality strength
-  per-series would likely improve MAPE further but wasn't the point of
-  this project — the pipeline was.
-- **No multi-task / auto-promotion DAG.** The Airflow DAG is
-  single-task (retrain on a schedule) per the project's own suggested
-  build order; a validation-and-conditional-promotion step (only
-  registering a new model version if it beats the current one on
-  held-out MAPE) is a natural next step, not yet built.
+- **No hyperparameter tuning for any model.** Every model (Prophet, the
+  4 global ML models, ARIMA's search space) uses sensible defaults, not
+  a tuned configuration. Tuning would likely improve every model's MAPE
+  somewhat, but wasn't the point of this project — the pipeline and the
+  cross-model comparison were.
+- **No multi-task / auto-promotion DAG.** The Airflow DAG retrains
+  Prophet only (single-task, per the project's own suggested build
+  order); it doesn't retrain or re-evaluate the other 6 approaches, and
+  there's no conditional promotion step (only registering a new model
+  version if it beats the current champion on held-out MAPE) — a natural
+  next step, not yet built.
+- **The FastAPI serving layer doesn't serve the champion model.**
+  `serving/app.py` still serves Prophet, not `sales_lightgbm@champion` —
+  see the architecture note above for why (global models need live
+  feature engineering to score a new request, a different and larger
+  problem than this project's serving layer currently solves).
+- **ARIMA's order search space is intentionally narrow**
+  (`max_p=2, max_q=2, max_P=1, max_Q=1`) to keep 100 parallel fits
+  tractable (~35s/series otherwise). A wider search might change
+  individual series' orders, though it's unlikely to fix the
+  fundamental issue the ARIMA finding above describes (extrapolating a
+  trend through a stockout it has no way to see coming) — no ARIMA order
+  search would have caught that.

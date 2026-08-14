@@ -1,37 +1,52 @@
 # Walmart M5 Demand Forecasting — MLOps Pipeline
 
 An end-to-end, production-shaped demand forecasting pipeline built on
-Kaggle's M5 Forecasting - Accuracy dataset: Prophet models, tracked and
-registered in MLflow, versioned with DVC, served via FastAPI, containerized
-with Docker, orchestrated with Airflow, and monitored with
-Prometheus/Grafana (including a prediction-drift check).
+Kaggle's M5 Forecasting - Accuracy dataset: **seven forecasting
+approaches compared head-to-head** (naive baseline, Prophet, SARIMA,
+Linear Regression, Random Forest, XGBoost, LightGBM), tracked and
+registered in MLflow (champion selected on aggregate MAPE), versioned
+with DVC, served via FastAPI, containerized with Docker, orchestrated
+with Airflow, monitored with Prometheus/Grafana (including a
+prediction-drift check), and explored interactively via a Streamlit
+comparison UI.
 
-The model itself (Prophet) is intentionally the simplest part of this
-project — the pipeline around it is the point. See
-[`results/writeup.md`](results/writeup.md) for the full methodology and
-results, and [`results/LEARNING_LOG.md`](results/LEARNING_LOG.md) for a
-detailed build log of every tool, decision, and bug hit along the way.
+See [`results/writeup.md`](results/writeup.md) for the full methodology
+and results, and [`results/LEARNING_LOG.md`](results/LEARNING_LOG.md) for
+a detailed build log of every tool, decision, and bug hit along the way.
 
 ## Results
 
-| Model | Mean per-series MAPE | Aggregate MAPE |
-|---|---|---|
-| Naive (seasonal, lag-7) | 78.58% | 10.75% |
-| **Prophet** | **68.58%** | **6.57%** |
+| Model | Mean per-series MAPE | Median per-series MAPE | Aggregate MAPE |
+|---|---|---|---|
+| **LightGBM** 🏆 (champion) | 73.45% | 33.60% | **5.82%** |
+| Linear Regression | 80.73% | 36.09% | 6.45% |
+| XGBoost | 74.71% | 33.55% | 6.48% |
+| Prophet | 68.58% | 33.83% | 6.57% |
+| Random Forest | 87.17% | 32.79% | 7.29% |
+| Naive (seasonal lag-7) | 78.58% | 40.86% | 10.75% |
+| ARIMA | 85.21% | 43.87% | 18.46% |
 
-100 series (top-100 by volume), 28-day held-out test horizon. See the
-write-up for why both MAPE framings are reported.
+100 series (top-100 by volume), 28-day held-out test horizon. **LightGBM
+is registered as the MLflow champion** (`sales_lightgbm@champion`),
+selected on aggregate MAPE — see the write-up for why that metric (not
+mean per-series MAPE) was used for selection, including a concrete case
+where a single outlier series inflated ARIMA's mean per-series MAPE
+above even the naive baseline.
 
 ## Architecture
 
 ```
 data/raw (DVC → DagsHub)
    → src/data_prep.py → data/processed/subset_long.csv
-   → src/baseline.py (naive MAPE reference)
-   → src/train.py (Prophet ×100 → MLflow tracking + Model Registry)
-   → serving/app.py (FastAPI, loads from MLflow registry) → Docker
-   → Prometheus (/metrics: latency, request count, prediction drift)
-   → Grafana (auto-provisioned dashboard)
+   → src/baseline.py            (naive)         --+
+   → src/train.py                (Prophet ×100)  --+
+   → src/train_arima.py          (SARIMA ×100)   --+--> MLflow tracking + registry
+   → src/feature_engineering.py (lag_28-based)     |
+       → src/train_ml_models.py (LinReg/RF/XGB/LightGBM, global) --+
+   → src/compare_models.py → results/full_model_comparison.csv → champion alias
+   → serving/app.py (FastAPI, Prophet) → Docker
+   → Prometheus (/metrics: latency, request count, prediction drift) → Grafana
+   → ui/app.py (Streamlit): backtest comparison across all 7 approaches
 
 airflow/dags/retrain_dag.py → weekly-scheduled retrain (Docker Compose, LocalExecutor)
 ```
@@ -42,11 +57,17 @@ airflow/dags/retrain_dag.py → weekly-scheduled retrain (Docker Compose, LocalE
 data/                  DVC-tracked raw + processed M5 data
 notebooks/eda.ipynb    Weekly seasonality, holiday/SNAP effects
 src/
-  data_prep.py         Scope full M5 down to top-100-by-volume subset
+  data_prep.py          Scope full M5 down to top-100-by-volume subset
   baseline.py           Naive seasonal MAPE reference
-  train.py              Prophet training + MLflow tracking/registry
+  train.py              Prophet training (per-series) + MLflow tracking/registry
+  train_arima.py        SARIMA training (per-series, parallelized)
+  feature_engineering.py  Leakage-safe lag_28-based features for the global ML models
+  train_ml_models.py    Linear Regression / Random Forest / XGBoost / LightGBM (global)
+  compare_models.py     Full comparison table + champion selection
+ui/
+  app.py                 Streamlit: per-series + overall backtest comparison
 serving/
-  app.py                FastAPI /predict, /health, /metrics
+  app.py                FastAPI /predict, /health, /metrics (serves Prophet)
   Dockerfile
 airflow/
   dags/retrain_dag.py    Weekly retraining DAG
@@ -59,6 +80,7 @@ docker-compose.yaml      Airflow stack (Postgres + webserver + scheduler)
 results/
   writeup.md              Methodology, results, architecture, scope notes
   LEARNING_LOG.md          Full build log with every difficulty and fix
+  full_model_comparison.csv
 ```
 
 ## Prerequisites
@@ -112,12 +134,38 @@ mlflow server --backend-store-uri sqlite:///mlflow.db --host 0.0.0.0 \
 Then, in another terminal:
 
 ```bash
-python src/train.py
+python src/train.py               # Prophet x100
+python src/train_arima.py         # SARIMA x100 (parallelized across CPU cores, ~10-15 min)
+python src/feature_engineering.py # builds data/processed/ml_features.csv
+python src/train_ml_models.py     # Linear Regression, Random Forest, XGBoost, LightGBM
+python src/compare_models.py      # builds results/full_model_comparison.csv, prints the champion
 ```
 
-Trains and registers all 100 Prophet models. MLflow UI: http://127.0.0.1:5000
+Registers all 7 approaches in the MLflow registry. MLflow UI:
+http://127.0.0.1:5000. `compare_models.py` picks the champion by
+aggregate MAPE but doesn't set the registry alias itself — set it
+explicitly once you've looked at the comparison table:
 
-### 4. Serve
+```python
+from mlflow import MlflowClient
+import mlflow
+mlflow.set_tracking_uri("http://127.0.0.1:5000")
+client = MlflowClient()
+latest = max(client.search_model_versions("name='sales_lightgbm'"), key=lambda v: int(v.version))
+client.set_registered_model_alias("sales_lightgbm", "champion", latest.version)
+```
+
+### 4. Explore the comparison (Streamlit)
+
+```bash
+streamlit run ui/app.py
+```
+
+Pick any of the 100 series and any subset of the 7 models to see actual
+vs. predicted sales over the test window, plus an overall aggregate-MAPE
+comparison tab.
+
+### 5. Serve
 
 ```bash
 uvicorn serving.app:app --reload
@@ -134,7 +182,7 @@ docker build -f serving/Dockerfile -t m5-forecast-api .
 docker run -p 8000:8000 -e MLFLOW_TRACKING_URI=http://host.docker.internal:5000 m5-forecast-api
 ```
 
-### 5. Orchestrate retraining (Airflow)
+### 6. Orchestrate retraining (Airflow)
 
 ```bash
 docker compose up airflow-init      # one-off: migrate DB, create admin user
@@ -145,7 +193,7 @@ Airflow UI: http://localhost:8080 (`airflow` / `airflow`). Unpause and
 trigger `m5_prophet_retrain` to run a retrain on demand, or let it fire
 on its weekly schedule.
 
-### 6. Monitoring (Prometheus + Grafana)
+### 7. Monitoring (Prometheus + Grafana)
 
 ```bash
 docker compose -f monitoring/docker-compose.yaml up -d --build
