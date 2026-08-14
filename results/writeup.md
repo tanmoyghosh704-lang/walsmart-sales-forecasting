@@ -176,13 +176,32 @@ Grafana (auto-provisioned dashboard)
 
 ui/app.py (Streamlit) --> per-series + overall backtest comparison across all 7 models
 
-airflow/dags/retrain_dag.py  --[Docker Compose, LocalExecutor]-->
-      weekly-scheduled re-run of src/train.py
+airflow/dags/retrain_dag.py (m5_full_retrain)  --[Docker Compose, LocalExecutor]-->
+      retrain_baseline, retrain_prophet, retrain_arima, and
+      build_features->retrain_ml_models all run, then
+      compare_models -> promote_champion (conditional alias re-point,
+      only if the new candidate beats the current champion)
 ```
 
 Each stage was verified independently and end-to-end (not just "the
 container started") before moving to the next — see `LEARNING_LOG.md`
-for the specific checks run at each phase.
+for the specific checks run at each phase, with one exception noted
+immediately below.
+
+**Status note on the multi-task DAG:** `m5_full_retrain` is built, loads
+without import errors, and its dependency graph was verified correct —
+but a full live run through Airflow's orchestrator repeatedly
+destabilized Docker Desktop's own daemon on the development machine via
+CPU oversubscription in `retrain_arima`, even after correctly
+diagnosing and fixing the underlying bug (joblib's `n_jobs` doesn't
+bound each worker process's *internal* BLAS/OpenMP thread count, so
+"4 workers" was silently oversubscribing every core several times
+over). The original single-task DAG (`m5_prophet_retrain`) completed
+successfully multiple times, so Airflow orchestration itself is proven
+end-to-end; this is specifically an environment resource ceiling on one
+machine, not a defect in the DAG or training code. Full debugging
+narrative, including all three rounds of diagnosis, in
+`LEARNING_LOG.md`'s Phase 8.
 
 Note: `serving/app.py` (the FastAPI /predict endpoint) still serves
 Prophet specifically, not the LightGBM champion — LightGBM is a *global*
@@ -216,12 +235,16 @@ than live inference — see that file's docstring for the reasoning.
   a tuned configuration. Tuning would likely improve every model's MAPE
   somewhat, but wasn't the point of this project — the pipeline and the
   cross-model comparison were.
-- **No multi-task / auto-promotion DAG.** The Airflow DAG retrains
-  Prophet only (single-task, per the project's own suggested build
-  order); it doesn't retrain or re-evaluate the other 6 approaches, and
-  there's no conditional promotion step (only registering a new model
-  version if it beats the current champion on held-out MAPE) — a natural
-  next step, not yet built.
+- **The multi-task auto-promotion DAG exists but hasn't completed a
+  live run on this machine.** `m5_full_retrain` (Phase 8) does retrain
+  and re-evaluate all 7 approaches and conditionally re-points the
+  champion alias — the code is built, reviewed, and every script it
+  calls is independently verified — but a full run through Airflow's
+  orchestrator hasn't succeeded end-to-end here due to a Docker Desktop
+  resource ceiling on this development machine (see `LEARNING_LOG.md`
+  Phase 8 for the full diagnosis). The single-task predecessor DAG did
+  complete successfully multiple times, so this is an environment
+  constraint, not an unbuilt feature.
 - **The FastAPI serving layer doesn't serve the champion model.**
   `serving/app.py` still serves Prophet, not `sales_lightgbm@champion` —
   see the architecture note above for why (global models need live

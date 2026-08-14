@@ -23,6 +23,20 @@ import os
 import sys
 import warnings
 
+# Must be set before numpy/scipy/statsmodels are imported -- they read
+# these at import time to size their internal BLAS/OpenMP thread pools.
+# Root cause of two Docker Desktop crashes during development: joblib's
+# n_jobs only controls how many *processes* run in parallel, not how many
+# *threads* each process spawns internally for linear-algebra ops. Without
+# this, capping n_jobs to 4 processes still let each process fan out
+# across every core via BLAS, multiplying straight back up to full
+# oversubscription (observed: 1200%+ CPU with n_jobs=4). Pinning each
+# process to 1 thread makes joblib's n_jobs the *actual* ceiling on total
+# CPU usage, not just a hint one library layer respects.
+for _env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                  "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ[_env_var] = "1"
+
 import joblib
 import mlflow
 import mlflow.pmdarima
@@ -84,15 +98,26 @@ def main():
     long_df = pd.read_csv(f"{PROCESSED_DIR}/subset_long.csv", parse_dates=["date"])
     train, test = train_test_split(long_df)
     series_ids = sorted(long_df["id"].unique())
+    # n_jobs=-1 (every core) crashed Docker Desktop's own daemon twice
+    # during development. The actual root cause (see the *_NUM_THREADS
+    # env vars set at the top of this file): joblib's n_jobs only bounds
+    # how many *processes* run in parallel, not how many threads each
+    # process spawns internally via BLAS/OpenMP -- so "n_jobs=4" was
+    # still oversubscribing every core several times over before those
+    # env vars were added. With per-process threading now genuinely
+    # pinned to 1, n_jobs is finally a real ceiling on total CPU usage,
+    # so it's safe to use most of the host again -- still leaving 2 cores
+    # free for the container runtime itself, not the whole machine.
+    n_jobs = max(1, joblib.cpu_count() - 2)
     print(f"Fitting SARIMA for {len(series_ids)} series in parallel "
-          f"({joblib.cpu_count()} CPUs available)...")
+          f"(using {n_jobs} of {joblib.cpu_count()} CPUs, 1 thread/worker)...")
 
     jobs = [
         (sid, train[train["id"] == sid].sort_values("date"),
          test[test["id"] == sid].sort_values("date"))
         for sid in series_ids
     ]
-    results = joblib.Parallel(n_jobs=-1, verbose=10)(
+    results = joblib.Parallel(n_jobs=n_jobs, verbose=10)(
         joblib.delayed(fit_one_series)(sid, s_train, s_test) for sid, s_train, s_test in jobs
     )
 

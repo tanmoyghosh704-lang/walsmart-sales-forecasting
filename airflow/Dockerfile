@@ -4,6 +4,17 @@
 # Build from repo root: docker build -f airflow/Dockerfile -t m5-airflow .
 FROM apache/airflow:2.10.4-python3.10
 
+# LightGBM's compiled extension needs the GNU OpenMP runtime at import
+# time, not just at pip-install time -- pip installing the lightgbm
+# wheel succeeds fine without it, but `import lightgbm` inside a task
+# then fails with `OSError: libgomp.so.1: cannot open shared object
+# file`. This is a system library, not a Python package, so it has to
+# come from apt, not pip. Needs root; switches back to airflow after.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+USER airflow
+
 COPY airflow/requirements.txt /requirements.txt
 
 # Installed into an isolated venv, NOT Airflow's own Python environment.

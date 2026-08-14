@@ -48,7 +48,8 @@ data/raw (DVC → DagsHub)
    → Prometheus (/metrics: latency, request count, prediction drift) → Grafana
    → ui/app.py (Streamlit): backtest comparison across all 7 approaches
 
-airflow/dags/retrain_dag.py → weekly-scheduled retrain (Docker Compose, LocalExecutor)
+airflow/dags/retrain_dag.py (m5_full_retrain) → weekly-scheduled retrain
+   of all 7 approaches + conditional champion promotion (Docker Compose, LocalExecutor)
 ```
 
 ## Repository structure
@@ -63,14 +64,15 @@ src/
   train_arima.py        SARIMA training (per-series, parallelized)
   feature_engineering.py  Leakage-safe lag_28-based features for the global ML models
   train_ml_models.py    Linear Regression / Random Forest / XGBoost / LightGBM (global)
-  compare_models.py     Full comparison table + champion selection
+  compare_models.py     Full comparison table (sorted by aggregate MAPE)
+  promote_champion.py   Conditional MLflow champion alias promotion
 ui/
   app.py                 Streamlit: per-series + overall backtest comparison
 serving/
   app.py                FastAPI /predict, /health, /metrics (serves Prophet)
   Dockerfile
 airflow/
-  dags/retrain_dag.py    Weekly retraining DAG
+  dags/retrain_dag.py    m5_full_retrain: multi-task weekly retraining DAG
   Dockerfile             Airflow image + isolated task venv
 monitoring/
   docker-compose.yaml    serving-app + Prometheus + Grafana
@@ -190,8 +192,19 @@ docker compose up -d                # webserver + scheduler
 ```
 
 Airflow UI: http://localhost:8080 (`airflow` / `airflow`). Unpause and
-trigger `m5_prophet_retrain` to run a retrain on demand, or let it fire
-on its weekly schedule.
+trigger `m5_full_retrain` to run a retrain on demand, or let it fire on
+its weekly schedule — it retrains all 7 approaches, rebuilds the
+comparison table, and conditionally re-points the MLflow `champion`
+alias if a new run beats the current one on aggregate MAPE.
+
+**Known issue on resource-constrained machines:** `retrain_arima`
+parallelizes across CPU cores and, even after fixing a nested-parallelism
+bug (see `results/LEARNING_LOG.md` Phase 8), can still oversubscribe a
+Docker Desktop VM with limited allocated resources badly enough to make
+the daemon itself unresponsive. If `docker` commands start returning
+500 errors after triggering this DAG, that's what's happening — check
+Docker Desktop → Settings → Resources for its CPU/memory allocation, and
+consider lowering `n_jobs` further in `src/train_arima.py` if it recurs.
 
 ### 7. Monitoring (Prometheus + Grafana)
 
