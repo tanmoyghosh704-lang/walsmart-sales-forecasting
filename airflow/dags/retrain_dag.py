@@ -1,14 +1,3 @@
-"""
-Weekly retraining DAG: retrains every forecasting approach compared in
-this project, rebuilds the comparison table, and conditionally promotes
-a new MLflow registry champion.
-
-    retrain_baseline  ---\\
-    retrain_svm       ----\\
-    retrain_arima     -----+--> compare_models --> promote_champion
-    build_features -> retrain_ml_models --/
-"""
-
 from datetime import datetime, timedelta
 
 from airflow import DAG

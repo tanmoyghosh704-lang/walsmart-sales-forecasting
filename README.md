@@ -117,7 +117,7 @@ monitoring/
   prometheus.yml
   grafana/               Datasource + dashboard provisioning
 docker-compose.yaml      Airflow stack (Postgres + webserver + scheduler)
-results/                 MAPE tables, forecasts, EDA plots
+results/                 MAPE tables + forecasts written by the scripts above (gitignored)
 ROADMAP.txt              Phase-by-phase build guide
 ```
 

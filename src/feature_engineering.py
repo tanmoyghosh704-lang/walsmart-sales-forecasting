@@ -1,17 +1,3 @@
-"""
-Build a feature-engineered, model-ready dataset for the global ML models
-(Linear Regression, Random Forest, XGBoost, LightGBM). SVM and ARIMA
-work directly off the raw long-format series and don't need this.
-
-Leakage-aware lag design: the task is a 28-day-ahead forecast, not a
-1-day-ahead rolling forecast, so a naive lag_7 feature would be unusable
-for most of the test window -- predicting day 15 of the horizon with
-"sales 7 days ago" would require knowing sales from day 8 of the
-horizon, which hasn't happened yet. lag_28 is the largest lag that stays
-valid for every day across the full 28-day horizon, so every
-history-based feature here is built on top of lag_28, not shorter lags.
-"""
-
 import pandas as pd
 
 RAW_DIR = "data/raw"
@@ -60,10 +46,6 @@ def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_price_features(df: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     df = df.merge(prices, on=["store_id", "item_id", "wm_yr_wk"], how="left")
-    # A handful of early weeks predate an item's price being listed at a
-    # given store; impute with that series' own median price rather than
-    # dropping rows (dropping would bias the training set toward items
-    # with complete price history).
     df["sell_price"] = df.groupby("id")["sell_price"].transform(
         lambda s: s.fillna(s.median())
     )
@@ -71,11 +53,6 @@ def add_price_features(df: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
 
 
 def encode_categoricals(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Label-encode categoricals for tree models. Linear Regression
-    one-hot-encodes these itself at train time (see src/train_ml_models.py)
-    -- ordinal codes would wrongly imply an order between categories for
-    a linear model, but tree models split on thresholds regardless of
-    encoding, so label codes are a fine, standard simplification there."""
     encoders = {}
     for col in CATEGORICAL_COLS:
         codes, uniques = pd.factorize(df[col])

@@ -1,15 +1,7 @@
-# Monitoring stack: the FastAPI serving app + Prometheus (scrapes it) +
-# Grafana (visualizes it). Separate from the root docker-compose.yaml
-# so each stack stays independently runnable.
-#
-# `build.context: ..` because Compose resolves relative paths against
-# this file's directory, and serving/Dockerfile needs the repo root.
-#
-# Usage:
-#   docker compose -f monitoring/docker-compose.yaml up -d --build
-#   Grafana:    http://localhost:3000  (admin / admin)
-#   Prometheus: http://localhost:9090
-#   API:        http://localhost:8000
+# docker compose -f monitoring/docker-compose.yaml up -d --build
+# Grafana:    http://localhost:3000  (admin / admin)
+# Prometheus: http://localhost:9090
+# API:        http://localhost:8000
 
 services:
   serving-app:

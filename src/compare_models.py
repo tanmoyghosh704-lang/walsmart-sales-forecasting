@@ -1,16 +1,3 @@
-"""
-Assemble the full model comparison across every approach in this
-project and identify the champion.
-
-Selection metric: aggregate MAPE rather than mean per-series MAPE.
-ARIMA's mean per-series MAPE is dominated by a single outlier series
-(an 856% error traced to a mid-test-window stockout), while its
-aggregate MAPE tells a far more representative story -- aggregate MAPE
-is much less sensitive to one pathological series, which is the
-property wanted in a selection metric. Median per-series MAPE is also
-reported for the same reason.
-"""
-
 import pandas as pd
 
 RESULTS_DIR = "results"

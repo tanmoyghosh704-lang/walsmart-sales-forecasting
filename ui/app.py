@@ -1,21 +1,3 @@
-"""
-Streamlit demo UI for the M5 forecasting project.
-
-Two views:
-1. Per-series backtest -- pick one of the 100 series, see actual sales
-   plotted against every model's test-period predictions, with each
-   model's MAPE for that series.
-2. Overall model comparison -- aggregate MAPE across all 100 series
-   from results/full_model_comparison.csv, with the registered champion
-   called out.
-
-Reads pre-computed backtest results (results/*_forecasts.csv) rather
-than generating live forecasts for arbitrary future dates -- the
-champion (LightGBM) is a global model that needs the full engineered
-feature set to score a new row, which is a separate concern from this
-comparison view.
-"""
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st

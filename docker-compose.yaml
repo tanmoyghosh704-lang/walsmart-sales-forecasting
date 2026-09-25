@@ -1,13 +1,6 @@
-# Minimal Airflow stack: LocalExecutor (webserver + scheduler + Postgres),
-# not the official docker-compose.yaml's default CeleryExecutor setup
-# (which adds Redis + a separate worker + triggerer). LocalExecutor runs
-# tasks inside the scheduler process itself, which is enough for a
-# single-machine retraining DAG.
-#
-# Usage:
-#   docker compose up airflow-init   # one-off: migrate DB, create admin user
-#   docker compose up -d             # start webserver + scheduler
-#   http://localhost:8080  (user: airflow / pass: airflow)
+# docker compose up airflow-init   # one-off: migrate DB, create admin user
+# docker compose up -d             # start webserver + scheduler
+# http://localhost:8080  (user: airflow / pass: airflow)
 
 x-airflow-common: &airflow-common
   build:
@@ -18,7 +11,6 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__SECRET_KEY: "m5-local-dev-secret-key"
-    # Reaches the host-side `mlflow server` from inside the container.
     MLFLOW_TRACKING_URI: http://host.docker.internal:5000
   volumes:
     - ./airflow/dags:/opt/airflow/dags

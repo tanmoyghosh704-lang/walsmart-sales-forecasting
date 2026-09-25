@@ -17,8 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY serving/ serving/
 
-# Static reference data /predict needs: calendar.csv for the snap
-# feature, subset_long.csv for valid series ids + the forecast window.
 COPY data/raw/calendar.csv data/raw/calendar.csv
 COPY data/processed/subset_long.csv data/processed/subset_long.csv
 

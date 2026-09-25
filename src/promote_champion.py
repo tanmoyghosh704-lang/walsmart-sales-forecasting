@@ -1,18 +1,3 @@
-"""
-Compare the freshly-trained global models against the currently
-registered champion and conditionally re-point the `champion` alias.
-Only promotes if the new candidate beats the current champion on
-aggregate MAPE, so a regressing retrain never overwrites a better model.
-
-Restricted to the 4 *global* models (Linear Regression, Random Forest,
-XGBoost, LightGBM). Each has exactly one registered model name, so a
-single alias can meaningfully point at "the current best version of
-that name." SVM and ARIMA are per-series (100 separately-registered
-models each) -- there's no single registered name an alias could
-represent for those, so if one wins on aggregate MAPE this script
-reports it but does not attempt to promote it.
-"""
-
 import os
 import sys
 
@@ -36,9 +21,6 @@ PROMOTABLE_MODELS = {
 
 
 def get_current_champion_mape(client: MlflowClient):
-    """Returns (registered_name, aggregate_mape) for whichever model
-    currently holds the champion alias, or (None, None) if no champion
-    has ever been promoted yet."""
     for name in PROMOTABLE_MODELS.values():
         try:
             mv = client.get_model_version_by_alias(name, ALIAS)

@@ -1,27 +1,8 @@
-"""
-Per-series SARIMA (seasonal ARIMA), one model per series. ARIMA has no
-natural "global across series" form, so per-series is the only sensible
-approach here.
-
-- seasonal=True, m=7: EDA found real weekly seasonality (weekend
-  spikes), so a non-seasonal model would systematically miss it.
-- snap passed as an exogenous regressor -- a real, known-in-advance
-  signal EDA found, not something that needs forecasting.
-- auto_arima's order search is the slow part (~35s/series
-  single-threaded), so fitting is parallelized across CPU cores via
-  joblib. MLflow logging stays sequential afterward in the main
-  process, since concurrent writers to nested runs across processes
-  is unreliable.
-"""
-
 import os
 import sys
 import warnings
 
-# Must be set before numpy/scipy/statsmodels are imported (they size
-# their BLAS/OpenMP thread pools at import time). Without this, each
-# joblib worker process independently tries to use every core for its
-# own linear algebra, so n_jobs alone does not bound total CPU usage.
+# Must be set before numpy/scipy/statsmodels are imported.
 for _env_var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                   "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ[_env_var] = "1"
@@ -86,7 +67,7 @@ def main():
     long_df = pd.read_csv(f"{PROCESSED_DIR}/subset_long.csv", parse_dates=["date"])
     train, test = train_test_split(long_df)
     series_ids = sorted(long_df["id"].unique())
-    n_jobs = max(1, joblib.cpu_count() - 2)  # leave headroom for the host/container runtime
+    n_jobs = max(1, joblib.cpu_count() - 2)
     print(f"Fitting SARIMA for {len(series_ids)} series in parallel "
           f"(using {n_jobs} of {joblib.cpu_count()} CPUs, 1 thread/worker)...")
 

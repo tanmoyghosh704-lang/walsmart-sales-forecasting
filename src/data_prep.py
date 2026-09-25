@@ -1,13 +1,3 @@
-"""
-Scope the full M5 dataset down to a manageable subset and reshape it into
-long format (one row per series-day) joined with calendar features.
-
-M5 has ~30,490 store-item series, too many to iterate on quickly. This
-keeps the top-N by total historical volume: high-volume series have
-less intermittent (zero-heavy) demand, which keeps MAPE meaningful
-instead of being dominated by divide-by-zero noise from slow movers.
-"""
-
 import pandas as pd
 
 RAW_DIR = "data/raw"
@@ -48,7 +38,6 @@ def to_long_format(sales_subset: pd.DataFrame, calendar: pd.DataFrame) -> pd.Dat
     long_df = long_df.merge(calendar[cal_cols], on="d", how="left")
     long_df["date"] = pd.to_datetime(long_df["date"])
 
-    # d_1, d_2, ... sorts lexicographically wrong (d_10 before d_2) — sort by date instead.
     long_df = long_df.sort_values(["id", "date"]).reset_index(drop=True)
     return long_df
 

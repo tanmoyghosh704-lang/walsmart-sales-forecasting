@@ -1,14 +1,9 @@
-# Keep the Docker build context small. Everything not excluded here
-# still gets sent to the Docker daemon as build context, regardless of
-# which files a Dockerfile's COPY lines actually use.
-
 .venv/
 .git/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Large raw M5 files serving/app.py doesn't need (only calendar.csv does)
 data/raw/sales_train_evaluation.csv
 data/raw/sales_train_validation.csv
 data/raw/sell_prices.csv

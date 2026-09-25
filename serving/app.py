@@ -1,29 +1,3 @@
-"""
-FastAPI serving layer.
-
-- GET /health -- liveness check.
-- GET /predict -- loads the SVR model for a given store-item series from
-  the MLflow Model Registry and returns a forecast for the requested
-  horizon.
-- GET /metrics -- Prometheus scrape endpoint: request latency/count (via
-  prometheus-fastapi-instrumentator) plus a custom prediction-drift metric.
-
-Forecast window: models were trained on data through 2016-03-27 and
-evaluated through 2016-04-24 (see src/train_svm.py). The `snap` feature
-those models need for future dates comes from calendar.csv, which is
-known through 2016-06-19 (SNAP eligibility is a published schedule, not
-something we forecast). /predict serves forecasts starting the day after
-evaluation ended, capped at how far the calendar actually extends.
-
-Drift metric: this is a forecast-serving API, not a live feature-scoring
-one, so there's no incoming raw feature vector to compare against a
-training distribution directly. Instead: a rolling window of recently
-served predictions is compared against the full historical sales
-distribution via a two-sample KS test. A significant shift is a signal
-worth investigating (model going stale, a genuine regime change, or a
-bug upstream).
-"""
-
 import os
 from collections import deque
 from datetime import timedelta
@@ -84,7 +58,7 @@ def load_model(series_id: str):
 
 
 def build_future(series_id: str, horizon: int) -> pd.DataFrame:
-    state = series_id.split("_")[-3]  # e.g. FOODS_1_218_TX_2_validation -> "TX"
+    state = series_id.split("_")[-3]
     dates = pd.date_range(_forecast_start, periods=horizon)
     trend = (dates - _train_start).days
     dow = dates.dayofweek

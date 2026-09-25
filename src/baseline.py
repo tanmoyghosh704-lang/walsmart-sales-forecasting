@@ -1,17 +1,3 @@
-"""
-Naive baseline forecast, computed before any modeling.
-
-Method: seasonal naive (lag-7) -- each series' last 7 observed training
-days, tiled across the 28-day test horizon. Captures weekly seasonality
-with zero model fitting; this is the bar every other model needs to beat.
-
-MAPE is undefined when actual sales = 0, which happens often in retail
-data. Zero-actual rows are excluded from the per-row average (standard
-practice), and an aggregate-level MAPE (summed sales across all series
-per day) is also reported, since summing across series makes exact
-zeros rare and gives a more stable number.
-"""
-
 import pandas as pd
 import numpy as np
 
@@ -35,7 +21,6 @@ def seasonal_naive_forecast(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataF
         last_week = series_train["sales"].tail(7).to_numpy()
         series_test = series_test.sort_values("date").reset_index(drop=True)
         horizon = len(series_test)
-        # tile the last observed 7-day pattern to cover the full horizon
         pred = np.tile(last_week, int(np.ceil(horizon / 7)))[:horizon]
         series_test = series_test.copy()
         series_test["forecast"] = pred
@@ -58,7 +43,6 @@ def main():
 
     result = seasonal_naive_forecast(train, test)
 
-    # Per-series MAPE
     per_series = (
         result.groupby("id")
         .apply(lambda g: mape(g["sales"].to_numpy(), g["forecast"].to_numpy()), include_groups=False)
@@ -67,7 +51,6 @@ def main():
     )
     per_series_mape = per_series["mape"].mean()
 
-    # Aggregate-level MAPE (sum sales across all series per day, then compare)
     daily = result.groupby("date")[["sales", "forecast"]].sum().reset_index()
     aggregate_mape = mape(daily["sales"].to_numpy(), daily["forecast"].to_numpy())
 

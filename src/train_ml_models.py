@@ -1,22 +1,3 @@
-"""
-Train four *global* models (one model each, across all 100 series at
-once, not per-series) on the leakage-aware lag_28-based feature set
-from src/feature_engineering.py:
-
-  - Linear Regression  (categoricals one-hot encoded, since ordinal
-                         codes would wrongly imply an order)
-  - Random Forest
-  - XGBoost
-  - LightGBM           (categoricals passed as true categorical features
-                         for better splits, not just integer codes)
-
-Same 28-day test horizon and MAPE framings as the other training
-scripts, so every model is directly comparable in
-results/full_model_comparison.csv.
-
-Hyperparameters are sensible defaults, not tuned via search.
-"""
-
 import os
 import sys
 

@@ -1,16 +1,3 @@
-"""
-Per-series SVR (Support Vector Regression), one model per series.
-
-SVR has no built-in trend/seasonality decomposition, so weekly
-seasonality and trend are engineered explicitly: a linear trend index
-and a sin/cos encoding of day-of-week (cyclical, so Sunday and Monday
-are close together instead of 6 apart like a raw 1-7 label would be).
-SNAP is passed as a regular feature, same role it plays in ARIMA.
-
-Features are standardized (SVR is scale-sensitive) via a
-StandardScaler -> SVR pipeline.
-"""
-
 import logging
 import os
 import sys

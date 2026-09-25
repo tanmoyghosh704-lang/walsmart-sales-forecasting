@@ -31,3 +31,7 @@ access_token
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Generated at runtime by the training/comparison scripts
+results/*.csv
+results/*.png
