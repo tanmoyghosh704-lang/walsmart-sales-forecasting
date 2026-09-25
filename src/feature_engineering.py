@@ -1,18 +1,15 @@
 """
 Build a feature-engineered, model-ready dataset for the global ML models
-(Linear Regression, Random Forest, XGBoost, LightGBM) -- Prophet and
-ARIMA work directly off the raw long-format series and don't need this.
+(Linear Regression, Random Forest, XGBoost, LightGBM). SVM and ARIMA
+work directly off the raw long-format series and don't need this.
 
-Leakage-aware lag design: the task is a 28-day-ahead forecast (same test
-horizon as Prophet), not a 1-day-ahead rolling forecast. A naive lag_7
-feature would be unusable for most of the test window -- predicting day
-15 of the horizon with "sales 7 days ago" would require knowing sales
-from day 8 of the horizon, which hasn't happened yet at forecast time.
-lag_28 is the largest lag that stays valid for *every* day across the
-full 28-day horizon (lag_28 for the last test day still points at the
-last training day), so every history-based feature here is built on top
-of lag_28, not shorter lags. This mirrors how top M5 competition
-solutions actually handled the same constraint.
+Leakage-aware lag design: the task is a 28-day-ahead forecast, not a
+1-day-ahead rolling forecast, so a naive lag_7 feature would be unusable
+for most of the test window -- predicting day 15 of the horizon with
+"sales 7 days ago" would require knowing sales from day 8 of the
+horizon, which hasn't happened yet. lag_28 is the largest lag that stays
+valid for every day across the full 28-day horizon, so every
+history-based feature here is built on top of lag_28, not shorter lags.
 """
 
 import pandas as pd

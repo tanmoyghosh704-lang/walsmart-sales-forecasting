@@ -1,20 +1,16 @@
 """
 Compare the freshly-trained global models against the currently
 registered champion and conditionally re-point the `champion` alias.
-Only promotes if the new candidate actually beats the current champion
-on aggregate MAPE -- a retrain that regresses shouldn't silently
-overwrite a better model.
+Only promotes if the new candidate beats the current champion on
+aggregate MAPE, so a regressing retrain never overwrites a better model.
 
-Deliberately restricted to the 4 *global* models (Linear Regression,
-Random Forest, XGBoost, LightGBM). Each has exactly one registered
-model name (sales_<name>), so a single alias can meaningfully point at
-"the current best version of that name." Prophet and ARIMA are
-per-series (100 separately-registered models each, e.g. 100 different
-"prophet_<series_id>" names) -- there is no single registered name an
-alias could point to that would represent "the champion Prophet model."
-If one of those wins on aggregate MAPE, this script reports it plainly
-rather than silently ignoring it or doing something architecturally
-incoherent, but it does not attempt to promote it.
+Restricted to the 4 *global* models (Linear Regression, Random Forest,
+XGBoost, LightGBM). Each has exactly one registered model name, so a
+single alias can meaningfully point at "the current best version of
+that name." SVM and ARIMA are per-series (100 separately-registered
+models each) -- there's no single registered name an alias could
+represent for those, so if one wins on aggregate MAPE this script
+reports it but does not attempt to promote it.
 """
 
 import os

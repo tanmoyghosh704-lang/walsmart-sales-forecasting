@@ -1,25 +1,20 @@
 """
 Train four *global* models (one model each, across all 100 series at
-once -- not per-series like Prophet/ARIMA) on the leakage-aware
-lag_28-based feature set from src/feature_engineering.py:
+once, not per-series) on the leakage-aware lag_28-based feature set
+from src/feature_engineering.py:
 
-  - Linear Regression  (simple baseline; categoricals one-hot encoded,
-                         since ordinal codes would wrongly imply an order
-                         a linear model would try to use)
+  - Linear Regression  (categoricals one-hot encoded, since ordinal
+                         codes would wrongly imply an order)
   - Random Forest
   - XGBoost
-  - LightGBM           (categoricals passed as true categorical features,
-                         not just integer codes, for better splits)
+  - LightGBM           (categoricals passed as true categorical features
+                         for better splits, not just integer codes)
 
-Same 28-day test horizon and same two MAPE framings (mean per-series,
-aggregate) as src/baseline.py and src/train.py, so all five models
-(naive, Prophet, and these four) are directly comparable in
-results/model_comparison.csv.
+Same 28-day test horizon and MAPE framings as the other training
+scripts, so every model is directly comparable in
+results/full_model_comparison.csv.
 
-Hyperparameters are sensible defaults, not tuned -- per this project's
-own stated goal, the pipeline (feature engineering leakage-safety,
-tracking, comparison, registry) is the point, not squeezing out the last
-percent of MAPE via a hyperparameter search.
+Hyperparameters are sensible defaults, not tuned via search.
 """
 
 import os

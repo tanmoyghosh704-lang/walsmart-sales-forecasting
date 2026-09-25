@@ -1,19 +1,15 @@
 """
-Naive baseline forecast, computed BEFORE any modeling.
+Naive baseline forecast, computed before any modeling.
 
-Method: seasonal naive (lag-7). We take each series' last 7 observed days
-of training data and tile that 7-day pattern across the 28-day test
-horizon. This captures weekly seasonality (e.g. weekend spikes) with zero
-model fitting -- it's the bar Prophet has to clear to justify its
-complexity. If Prophet can't beat this, Prophet isn't earning its place
-in the pipeline.
+Method: seasonal naive (lag-7) -- each series' last 7 observed training
+days, tiled across the 28-day test horizon. Captures weekly seasonality
+with zero model fitting; this is the bar every other model needs to beat.
 
-Metric: MAPE (Mean Absolute Percentage Error), per the project's headline
-metric. Caveat logged here for the writeup: MAPE is undefined when actual
-sales = 0, which happens often in retail data. We exclude zero-actual rows
-from the per-row MAPE average (standard practice) and separately report
-an aggregate-level MAPE (summed sales across all series per day) as a
-more stable number, since summing across series makes exact zeros rare.
+MAPE is undefined when actual sales = 0, which happens often in retail
+data. Zero-actual rows are excluded from the per-row average (standard
+practice), and an aggregate-level MAPE (summed sales across all series
+per day) is also reported, since summing across series makes exact
+zeros rare and gives a more stable number.
 """
 
 import pandas as pd

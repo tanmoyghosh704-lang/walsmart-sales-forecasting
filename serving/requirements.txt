@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic
 mlflow
-prophet
+scikit-learn
 pandas
 numpy
 scipy

@@ -3,16 +3,16 @@ PROJECT ROADMAP & RESOURCE BREAKDOWN: WALMART M5 DEMAND FORECASTING MLOPS
 ================================================================================
 
 PROJECT OVERVIEW:
-An end-to-end, production-shaped demand forecasting system built on Kaggle's
-M5 Forecasting - Accuracy dataset (Walmart). Benchmarks 7 forecasting
-approaches (naive seasonal baseline, Prophet, SARIMA, Linear Regression,
-Random Forest, XGBoost, LightGBM) on 100 high-volume store-item series over a
-28-day held-out horizon, tracks and registers every model via MLflow with
-conditional champion auto-promotion, versions data via DVC/DagsHub, serves
-forecasts via FastAPI + Docker, orchestrates retraining via Airflow, monitors
-the live service via Prometheus/Grafana (including a prediction-drift check),
-and provides an interactive Streamlit comparison UI. The forecasting models
-themselves are deliberately simple -- the pipeline around them is the point.
+An end-to-end, production-shaped demand forecasting system built on
+Kaggle's M5 Forecasting - Accuracy dataset (Walmart). Benchmarks 7
+forecasting approaches (naive seasonal baseline, SVM, SARIMA, Linear
+Regression, Random Forest, XGBoost, LightGBM) on 100 high-volume
+store-item series over a 28-day held-out horizon, tracks and registers
+every model via MLflow with conditional champion auto-promotion,
+versions data via DVC/DagsHub, serves forecasts via FastAPI + Docker,
+orchestrates retraining via Airflow, monitors the live service via
+Prometheus/Grafana (including a prediction-drift check), and provides
+an interactive Streamlit comparison UI.
 
 ================================================================================
 PHASE 0: ACCOUNTS, DATA ACCESS & ENVIRONMENT SETUP
@@ -23,36 +23,25 @@ PHASE 0: ACCOUNTS, DATA ACCESS & ENVIRONMENT SETUP
      * kaggle.com/settings -> API section -> "Create New Token" (downloads
        kaggle.json with {"username":..., "key":...}).
      * Must also click "Join Competition" on the M5 Forecasting - Accuracy
-       page, or downloads 403 even with a valid token.
-     * Move to ~/.kaggle/kaggle.json, chmod 600 (owner-read/write only).
+       page.
+     * Move to ~/.kaggle/kaggle.json, chmod 600.
    - DagsHub Account & Access Token:
      * Free tier. Create a repo (git + DVC combined host).
      * Generate a personal access token under user settings -> Tokens.
-     * Used for BOTH the DVC remote (data storage) and as a second git
-       remote (so the DagsHub repo's Files tab shows actual code, not just
-       raw data blobs -- these are two separate pushes: `dvc push` vs.
-       `git push dagshub master`).
-   - GitHub repo (primary git remote / CV-visible source of truth).
+     * Used both as the DVC remote and as a second git remote.
+   - GitHub repo (primary git remote).
    - Docker Desktop (Windows/Mac) or Docker Engine (Linux):
      * Needed for the serving container, Airflow's multi-container stack,
        and the Prometheus/Grafana monitoring stack.
-     * GOTCHA: on memory-constrained hosts (~16GB or less) running Docker
-       Desktop via WSL2, check %USERPROFILE%\.wslconfig -- WSL2's default
-       memory cap is ~50% of total host RAM, shared across ALL WSL
-       distros, not just Docker's. A `.wslconfig` with an explicit
-       `memory=` value may be needed before running memory-heavy parallel
-       training inside containers.
 
 2. SOFTWARE & DEPENDENCIES TO INSTALL:
    - Python 3.10 virtual environment:
      python -m venv .venv
      .venv/Scripts/pip install -r requirements.txt
    - Core stack (see requirements.txt):
-     pandas, numpy, scikit-learn, prophet, statsmodels, pmdarima, lightgbm,
+     pandas, numpy, scikit-learn, statsmodels, pmdarima, lightgbm,
      xgboost, mlflow, dvc, fastapi, uvicorn, prometheus-client,
      prometheus-fastapi-instrumentator, streamlit, plotly, kaggle
-   - Kaggle CLI: pip install kaggle (bundled in requirements.txt)
-   - DVC: pip install dvc (bundled in requirements.txt)
 
 ================================================================================
 PHASE 1: DATA ACQUISITION & SCOPING
@@ -70,23 +59,18 @@ PHASE 1: DATA ACQUISITION & SCOPING
    - Full dataset has ~30,490 store-item series -- too many to iterate on.
    - Select TOP 100 SERIES BY TOTAL HISTORICAL VOLUME, not a random
      sample. High-volume series have proportionally fewer zero-sales
-     days, which matters directly for MAPE (division by near-zero
-     actuals otherwise dominates the metric with noise).
-   - Side effect worth knowing: volume-based selection skews the subset
-     toward FOODS (97/100 series here) -- grocery items are bought far
-     more often than e.g. household goods. Not representative of the
-     full catalog; a deliberate, stated bias.
-   - Reshape wide format (d_1...d_1913 columns) to LONG FORMAT
-     (id, date, sales, ...) via pandas.melt -- required by
-     Prophet (ds/y columns) and every downstream groupby.
+     days, which matters directly for MAPE.
+   - This skews the subset toward FOODS (grocery items sell far more
+     often than hobbies or household goods) -- a real bias, stated
+     explicitly rather than hidden.
+   - Reshape wide format (d_1...d_1913 columns) to long format
+     (id, date, sales, ...) via pandas.melt.
    - Output: data/processed/subset_long.csv (191,300 rows).
 
 3. NAIVE BASELINE, BEFORE ANY MODELING (src/baseline.py):
    - Seasonal-naive (lag-7): each series' last 7 observed training days,
-     tiled across the 28-day test horizon. The free lunch any real model
-     has to beat to justify its complexity.
+     tiled across the 28-day test horizon.
    - 28-day held-out test window (matches M5's own competition horizon).
-   - MAPE computed multiple ways (see Phase 4, concept: MAPE framings).
    - Result: 78.58% mean per-series MAPE / 10.75% aggregate MAPE.
 
 ================================================================================
@@ -96,35 +80,32 @@ PHASE 2: EXPLORATORY DATA ANALYSIS
 1. NOTEBOOK: notebooks/eda.ipynb
    - Weekly seasonality: weekend sales (~40 units/day) vs. midweek (~28).
    - SNAP (food-assistance) effect: real, consistent bump on SNAP days in
-     every state (CA/TX/WI) -- a genuine, usable signal.
-   - Calendar holiday effect: SURPRISINGLY WEAK for this FOODS-heavy
-     subset -- checked the assumption instead of blindly trusting it.
+     every state (CA/TX/WI).
+   - Calendar holiday effect: weak for this FOODS-heavy subset.
    - Executed via `jupyter nbconvert --to notebook --execute --inplace`
-     so results are baked into the notebook file itself (reviewable
-     without re-running).
+     so results are baked into the notebook file itself.
 
 ================================================================================
-PHASE 3: PER-SERIES MODELS -- PROPHET & ARIMA
+PHASE 3: PER-SERIES MODELS -- SVM & ARIMA
 ================================================================================
 
 1. WHY PER-SERIES FOR THESE TWO:
-   Prophet and ARIMA both model a single series' own trend/seasonality/
-   autocorrelation structure -- neither has a natural "global across
-   series" form. 100 series = 100 independent models for each.
+   SVM and ARIMA are both trained on a single series' own history --
+   neither has a natural "global across series" form. 100 series = 100
+   independent models for each.
 
-2. PROPHET (src/train.py):
-   - One Prophet model per series (additive model: trend + weekly/yearly
-     seasonality + holidays + regressors).
-   - Holidays fed via Prophet's native `holidays` parameter
-     (calendar.csv's event_name_1/date).
-   - SNAP fed as `model.add_regressor("snap")` -- a real signal EDA
-     found, and its future values are a published schedule, not
-     something that needs forecasting.
-   - Result: 68.58% mean per-series MAPE / 6.57% aggregate MAPE.
+2. SVM (src/train_svm.py):
+   - Per-series SVR (Support Vector Regression) with an RBF kernel,
+     wrapped in a StandardScaler -> SVR pipeline (SVR is scale-sensitive).
+   - SVR has no built-in trend/seasonality decomposition, so features
+     are engineered explicitly: a linear trend index, a sin/cos
+     encoding of day-of-week (cyclical, so Sunday and Monday stay
+     close together instead of 6 apart), and SNAP as a regular feature.
+   - Result: 60.37% mean per-series MAPE / 7.83% aggregate MAPE.
 
 3. ARIMA / SARIMA (src/train_arima.py):
    - `pmdarima.auto_arima`, seasonal=True, m=7 (weekly seasonality),
-     snap as an exogenous regressor (X=), same reasoning as Prophet.
+     SNAP as an exogenous regressor.
    - PARALLELIZED across CPU cores via joblib (a single auto_arima call
      takes ~35s; 100 sequential would be 1hr+).
    - GOTCHA (nested parallelism): joblib's `n_jobs` only bounds worker
@@ -133,24 +114,24 @@ PHASE 3: PER-SERIES MODELS -- PROPHET & ARIMA
      default regardless of how many sibling processes are already
      running. Fix: set OMP_NUM_THREADS, OPENBLAS_NUM_THREADS,
      MKL_NUM_THREADS, NUMEXPR_NUM_THREADS, VECLIB_MAXIMUM_THREADS = "1"
-     BEFORE importing numpy/scipy/statsmodels (they read these at
-     import time). Without this, "n_jobs=4" can silently use 12+ cores.
+     before importing numpy/scipy/statsmodels (they read these at
+     import time).
    - Result: 85.21% mean / 43.87% median / 18.46% aggregate MAPE --
-     WORSE than the naive baseline on every framing. Investigated rather
-     than hidden (see Phase 4, concept: MAPE outlier sensitivity).
+     worse than the naive baseline on every framing. Traced to one
+     series with an 856% single-series MAPE from a real stockout mid
+     test-window (see Phase 5, champion selection).
 
 ================================================================================
 PHASE 4: GLOBAL ML MODELS -- FEATURE ENGINEERING & TRAINING
 ================================================================================
 
 1. GLOBAL VS. PER-SERIES (key design fork):
-   - Per-series (Prophet/ARIMA): 100 separate models, each blind to every
+   - Per-series (SVM/ARIMA): 100 separate models, each blind to every
      other series.
    - GLOBAL (this phase): ONE model per algorithm, trained on all 100
      series stacked into a single table, with store_id/item_id/dept_id/
-     cat_id/state_id as FEATURES. Lets the model learn cross-series
-     patterns a per-series model structurally cannot see. This mirrors
-     how the real M5 competition's top solutions actually approached it.
+     cat_id/state_id as FEATURES. This mirrors how the real M5
+     competition's top solutions actually approached it.
 
 2. LEAKAGE-SAFE FEATURE ENGINEERING (src/feature_engineering.py):
    - CONCEPT -- why lag_28, not lag_7: this is a 28-day-AHEAD forecast,
@@ -158,27 +139,20 @@ PHASE 4: GLOBAL ML MODELS -- FEATURE ENGINEERING & TRAINING
      window (predicting day 15 of the horizon with "sales 7 days ago"
      needs sales from day 8 of the horizon, which hasn't happened yet).
      lag_28 is the LARGEST lag that stays valid for the ENTIRE 28-day
-     horizon (lag_28 on the last test day still points at the last
-     training day). Every history feature is built on top of this lag.
+     horizon.
    - Features: lag_28, rolling_mean_7_lag28, rolling_mean_28_lag28,
      rolling_std_28_lag28, wday/month/year, is_weekend, has_event, snap,
-     sell_price (joined from sell_prices.csv on store_id/item_id/
-     wm_yr_wk -- never used by the Prophet/ARIMA phase).
-   - Categorical encoding: label/integer codes for tree models (fine --
-     trees split on thresholds regardless of encoding); ONE-HOT for
-     Linear Regression via sklearn ColumnTransformer (ordinal codes
-     would wrongly imply an order a linear model would try to use).
-   - Output: data/processed/ml_features.csv (185,800 rows -- 5,500
-     dropped per series for insufficient lag_28 history at series start).
+     sell_price (joined from sell_prices.csv).
+   - Categorical encoding: label/integer codes for tree models; ONE-HOT
+     for Linear Regression via sklearn ColumnTransformer.
+   - Output: data/processed/ml_features.csv (185,800 rows).
 
 3. TRAINING (src/train_ml_models.py):
    - Linear Regression, Random Forest, XGBoost, LightGBM -- one
      `.fit()`/`.predict()` call each (no per-series loop).
-   - LightGBM given TRUE categorical columns (pandas `category` dtype +
-     `categorical_feature=`) for better split quality than raw integer
-     codes.
-   - No hyperparameter tuning -- sensible defaults only; the comparison
-     and pipeline are the point, not squeezing out the last % of MAPE.
+   - LightGBM given TRUE categorical columns for better split quality
+     than raw integer codes.
+   - No hyperparameter tuning -- sensible defaults only.
    - Results (aggregate MAPE): LightGBM 5.82%, Linear Regression 6.45%,
      XGBoost 6.48%, Random Forest 7.29%.
 
@@ -192,27 +166,20 @@ PHASE 5: EXPERIMENT TRACKING, MODEL REGISTRY & DATA VERSIONING
 
    - CONCEPT -- why a server, not a bare local file store: MLflow's local
      file-based artifact store bakes an ABSOLUTE HOST FILESYSTEM PATH
-     into each experiment's artifact location at creation time. Works
-     fine same-machine, but breaks the moment a client (e.g. a Docker
-     container) runs anywhere else -- the path doesn't exist there.
-     Routing through a tracking server means clients talk to a network
-     address; the server resolves storage on its own filesystem. This is
-     what makes the setup portable into Docker.
+     into each experiment's artifact location at creation time, which
+     breaks the moment a client (e.g. a Docker container) runs anywhere
+     else. Routing through a tracking server means clients talk to a
+     network address, and the server resolves storage on its own
+     filesystem.
    - `--allowed-hosts` needed because MLflow 3.x has built-in DNS-
      rebinding protection that 403s requests whose Host header isn't on
-     an allowlist (must include the exact host:port a container will
-     connect with, e.g. host.docker.internal:5000).
+     an allowlist.
 
 2. LOGGING PATTERN:
-   - Per-series models (Prophet, ARIMA): one PARENT run per training job
-     + one NESTED run per series (mlflow.start_run(nested=True)),
-     logging that series' own params/MAPE and registering it under its
-     own name (`prophet_<series_id>`, `arima_<series_id>`).
+   - Per-series models (SVM, ARIMA): one PARENT run per training job
+     + one NESTED run per series, registering each under its own name
+     (`svm_<series_id>`, `arima_<series_id>`).
    - Global models: one run each, registered as `sales_<model_name>`.
-   - Model flavors used: mlflow.prophet, mlflow.pmdarima (deprecated but
-     functional), mlflow.sklearn, mlflow.xgboost, mlflow.lightgbm --
-     each knows how to serialize/deserialize that specific library's
-     model object.
 
 3. DATA VERSIONING (DVC + DagsHub):
    dvc remote add origin https://dagshub.com/<user>/<repo>.dvc
@@ -222,20 +189,11 @@ PHASE 5: EXPERIMENT TRACKING, MODEL REGISTRY & DATA VERSIONING
    dvc add data/raw data/processed
    dvc push -r origin
 
-   - CONCEPT: DVC hashes directory contents, moves the real bytes into a
-     content-addressed cache, and commits only a small `.dvc` pointer
-     file to git. Git stays small/fast; DVC's remote holds the actual
-     data.
    - Credentials go in `.dvc/config.local` (gitignored), never the
      committed `.dvc/config`.
-   - GOTCHA: DVC refuses to `add` a directory git already partially
-     tracks (e.g. leftover .gitkeep placeholders) -- `git rm --cached`
-     them first.
-   - REMEMBER: `dvc push` only pushes DATA. It does NOT push your git
-     commit history to DagsHub. If DagsHub's Files tab looks empty
-     despite successful `dvc push`, you need a SEPARATE git remote and
-     `git push dagshub master` -- two different pushes, two different
-     purposes.
+   - `dvc push` only pushes DATA, not git history. A separate
+     `git push dagshub master` is needed for the DagsHub Files tab to
+     show actual code.
 
 4. CHAMPION SELECTION & CONDITIONAL AUTO-PROMOTION:
    - src/compare_models.py: assembles every model's summary + per-series
@@ -243,25 +201,17 @@ PHASE 5: EXPERIMENT TRACKING, MODEL REGISTRY & DATA VERSIONING
    - CONCEPT -- why aggregate MAPE, not mean per-series MAPE, as the
      SELECTION metric: ARIMA's mean per-series MAPE (85%) was dragged
      above even the naive baseline by ONE series with an 856% error --
-     traced to a genuine stockout mid-test-window, invisible in training
-     history, that no history-only model could have anticipated (same
-     MAPE small-denominator sensitivity as intermittent retail demand
-     generally). A selection metric that lets one pathological series
-     disqualify an otherwise-good model is a bad selection metric, even
-     though that per-series number is still worth reporting for
-     transparency.
+     a genuine stockout mid-test-window, invisible in training history.
+     Aggregate MAPE is far less sensitive to a single pathological
+     series, which is the property wanted in a selection metric.
    - src/promote_champion.py: re-points the MLflow registry's `champion`
-     ALIAS (modern replacement for the deprecated "stage" concept) to
-     whichever model has the best aggregate MAPE -- but ONLY if it beats
-     the CURRENT champion's aggregate MAPE (looked up via
-     `client.get_model_version_by_alias(...)` -> run_id -> that run's
-     logged metric, not a cached number). A retrain that regresses
-     should not silently overwrite a better model already promoted.
+     ALIAS to whichever model has the best aggregate MAPE, but ONLY if
+     it beats the CURRENT champion's aggregate MAPE (looked up via the
+     run that produced it, not a cached number).
    - Restricted to the 4 GLOBAL models only: each has exactly one
-     registered name, so one alias can mean "the current best version of
-     this name." Prophet/ARIMA are per-series (100 separately-registered
-     names each) -- no single name an alias could represent "the
-     champion Prophet model."
+     registered name, so one alias can mean "the current best version
+     of this name." SVM/ARIMA are per-series (100 separately-registered
+     names each) -- no single name an alias could represent.
    - Winner: LightGBM, 5.82% aggregate MAPE (45.8% relative improvement
      over the naive baseline). Registered as `sales_lightgbm@champion`.
 
@@ -272,14 +222,12 @@ PHASE 6: SERVING -- FASTAPI + DOCKER
 1. FASTAPI APP (serving/app.py):
    - GET /health -- liveness + forecast-window info.
    - GET /predict?series_id=...&horizon=... -- loads the requested
-     series' Prophet model via `mlflow.pyfunc.load_model
-     ("models:/prophet_<series_id>/latest")` (registry URI, not a
-     pickle file), cached per-process via `functools.lru_cache`.
+     series' SVM model via `mlflow.pyfunc.load_model
+     ("models:/svm_<series_id>/latest")`, cached per-process.
    - CONCEPT -- forecast window is bounded, not open-ended: models were
-     trained through a fixed date; the `snap` regressor they need for
+     trained through a fixed date; the `snap` feature they need for
      future dates only has REAL (not fabricated) values as far as
-     calendar.csv actually extends. /predict rejects horizons beyond
-     that with a clear error instead of guessing.
+     calendar.csv actually extends.
    - GET /metrics -- Prometheus scrape endpoint (see Phase 8).
 
 2. DOCKERFILE (serving/Dockerfile):
@@ -287,70 +235,52 @@ PHASE 6: SERVING -- FASTAPI + DOCKER
    docker run -p 8000:8000 -e MLFLOW_TRACKING_URI=http://host.docker.internal:5000 \
      m5-forecast-api
 
-   - GOTCHA: do NOT bake mlflow.db/mlruns into the image (see Phase 5's
-     "why a tracking server" concept -- baked-in artifact paths break
-     inside a container). Pass MLFLOW_TRACKING_URI as an env var instead.
-   - `.dockerignore` matters even with targeted COPY lines: Docker sends
-     the ENTIRE build context to the daemon before any COPY runs,
-     regardless of what's actually used.
+   - GOTCHA: do NOT bake mlflow.db/mlruns into the image -- baked-in
+     artifact paths break inside a container. Pass
+     MLFLOW_TRACKING_URI as an env var instead.
 
 ================================================================================
 PHASE 7: ORCHESTRATION -- AIRFLOW (DOCKER COMPOSE)
 ================================================================================
 
 1. WHY DOCKER COMPOSE, NOT NATIVE PIP INSTALL:
-   Airflow doesn't officially support running natively on Windows (only
-   Linux, or Windows via WSL2/Docker).
+   Airflow doesn't officially support running natively on Windows.
 
-2. STACK (docker-compose.yaml): Postgres (Airflow's OWN metadata DB, not
-   MLflow's) + webserver + scheduler, LocalExecutor (not the official
-   compose file's default CeleryExecutor, which adds Redis + a separate
-   worker + triggerer -- overkill for "prove the orchestration works").
+2. STACK (docker-compose.yaml): Postgres (Airflow's OWN metadata DB) +
+   webserver + scheduler, LocalExecutor.
    docker compose up airflow-init      # one-off: migrate DB, create admin user
    docker compose up -d                # webserver + scheduler
 
 3. TASK DEPENDENCIES INSTALLED IN AN ISOLATED VENV (airflow/Dockerfile):
-   - Installing prophet/mlflow/lightgbm/etc. DIRECTLY into Airflow's own
-     Python environment (the officially recommended `pip install
-     --constraint <airflow-constraints-url>` pattern) FAILED repeatedly --
-     mlflow/prophet's dependency requirements collide with versions
-     Airflow's constraints file pins exactly (pandas, then cryptography).
-   - Fix: `python -m venv /opt/airflow/task_venv`, install everything
-     there instead. Nothing installed in an isolated venv can ever break
-     Airflow's own packages. The DAG invokes this venv's python directly.
-   - Also needed: `apt-get install libgomp1` (GNU OpenMP runtime) --
-     LightGBM's compiled extension needs it AT IMPORT TIME, not just at
-     pip-install time; the base Debian image doesn't ship it.
+   - Installing mlflow/scikit-learn/etc. directly into Airflow's own
+     Python environment conflicts with versions Airflow's own
+     constraints file pins. Fix: `python -m venv /opt/airflow/task_venv`,
+     install everything there instead, and invoke that venv's python
+     directly from the DAG.
+   - Also needed: `apt-get install libgomp1` -- LightGBM's compiled
+     extension needs it at import time, and the base Debian image
+     doesn't ship it.
 
 4. DAG STRUCTURE (airflow/dags/retrain_dag.py, dag_id=m5_full_retrain):
      retrain_baseline  ---\
-     retrain_prophet   ----\
+     retrain_svm       ----\
      retrain_arima     -----+--> compare_models --> promote_champion
      build_features -> retrain_ml_models --/
 
    - `max_active_runs=1`: catchup=False still auto-runs the single most
      recent past interval on DAG activation, which can overlap with a
-     manual trigger -- two concurrent runs each spawning parallel ARIMA
-     fits is a real resource-exhaustion risk (see below).
-   - `execution_timeout` on every task: a hung task (e.g. a DB heartbeat
-     failure with no progress) should fail loudly, not block the DAG
-     indefinitely.
+     manual trigger.
+   - `execution_timeout` on every task so a hung task fails loudly
+     instead of blocking the DAG indefinitely.
 
 5. GOTCHA -- RESOURCE CONSTRAINTS ON SMALL DEV MACHINES:
-   Running several memory-heavy tasks CONCURRENTLY (Prophet + ARIMA +
-   4 ML models fitting at once, which is the architecturally correct
-   parallel DAG design) can exceed what a modest host (e.g. ~14GB RAM
-   shared across Windows + WSL2 + Docker + a second WSL distro) can
-   sustain -- manifesting as the CONTAINER RUNTIME ITSELF becoming
-   unresponsive, not a training script error. Diagnosed via: `docker
-   stats` for CPU/memory trend, Docker Desktop's own settings file
-   (%APPDATA%\Docker\settings-store.json) to check if it's running in
-   WSL2-integration mode, `%USERPROFILE%\.wslconfig` for an explicit
-   memory override, `Get-CimInstance Win32_ComputerSystem` for total
-   host RAM, and `wsl -l -v` to check for other competing WSL distros.
-   A real fix beyond tuning any single task: restructure heavy tasks to
-   run SEQUENTIALLY instead of in parallel, trading DAG wall-clock time
-   for a lower peak memory footprint.
+   Running several memory-heavy tasks concurrently (SVM + ARIMA + 4 ML
+   models fitting at once) can exceed what a modest host can sustain.
+   Diagnose with `docker stats`, Docker Desktop's settings file, and
+   (on Windows/WSL2) `%USERPROFILE%\.wslconfig` for an explicit memory
+   override. A structural fix beyond tuning any single task: run heavy
+   tasks sequentially instead of in parallel, trading DAG wall-clock
+   time for a lower peak memory footprint.
 
 ================================================================================
 PHASE 8: MONITORING -- PROMETHEUS + GRAFANA
@@ -364,34 +294,27 @@ PHASE 8: MONITORING -- PROMETHEUS + GRAFANA
    `prometheus-fastapi-instrumentator` -- one line
    (`Instrumentator().instrument(app).expose(app)`) adds a /metrics
    endpoint with request-count and latency-histogram metrics for every
-   route, zero custom instrumentation code.
+   route.
 
-3. PREDICTION DRIFT (the actual differentiator):
+3. PREDICTION DRIFT:
    - CONCEPT: this is a forecast-serving API, not a live feature-scoring
-     one -- there's no incoming raw feature vector to compare against a
-     training distribution the way a textbook drift check would. The
-     analogue used here: a rolling window of the last 200 SERVED
-     PREDICTIONS (yhat values, no dates attached) compared via a
-     two-sample KOLMOGOROV-SMIRNOV TEST against the FULL HISTORICAL
-     TRAINING SALES DISTRIBUTION (also just values, no dates -- KS is a
-     pure value-distribution comparison, time-independent).
-   - What KS actually measures: the largest vertical gap between the two
-     samples' empirical CDFs. Statistic near 0 = distributions look
-     alike; near 1 = very different. p-value = how likely this much gap
-     is by chance if they were really the same distribution.
-   - Why this matters without ground truth: you can't check a forecast's
-     ACCURACY in production until real future sales arrive (could be
-     weeks). Drift is a LEADING indicator checkable immediately --
-     doesn't tell you if a specific forecast was right, tells you if the
-     model's outputs still resemble what it learned from.
-   - Known limitation (stated honestly, not hidden): the reference
-     distribution is POOLED across all 100 series. Querying one
-     low-volume series repeatedly makes the statistic look "worse" than
-     it should -- a production version would want a per-series baseline.
+     one, so there's no incoming raw feature vector to compare against a
+     training distribution directly. The analogue used here: a rolling
+     window of the last 200 served predictions compared via a
+     two-sample KOLMOGOROV-SMIRNOV TEST against the full historical
+     training sales distribution.
+   - What KS measures: the largest gap between the two samples'
+     empirical CDFs. Statistic near 0 = distributions look alike; near
+     1 = very different.
+   - Why this matters without ground truth: forecast accuracy can't be
+     checked until real future sales arrive (could be weeks). Drift is
+     a leading indicator checkable immediately.
+   - Known limitation: the reference distribution is POOLED across all
+     100 series, not per-series.
    - Grafana dashboard GOTCHA: a `$datasource` template variable with no
-     default `current` value never resolves -- every panel silently
-     queries a literal unresolved string and shows nothing. Fix: omit
-     `datasource` on each panel and let Grafana use its single default.
+     default value never resolves -- every panel silently queries a
+     literal unresolved string and shows nothing. Fix: omit `datasource`
+     on each panel and let Grafana use its single default.
 
 ================================================================================
 PHASE 9: INTERACTIVE COMPARISON UI -- STREAMLIT
@@ -402,10 +325,10 @@ PHASE 9: INTERACTIVE COMPARISON UI -- STREAMLIT
 2. DESIGN: visualizes PRE-COMPUTED backtest results
    (results/*_forecasts.csv), not live future forecasts. The champion
    (LightGBM) is a global model needing the full engineered feature set
-   to score a new row -- a meaningfully larger, different problem than a
-   comparison demo needs. Two tabs: per-series actual-vs-predicted across
-   any subset of the 7 models, and an overall aggregate-MAPE comparison
-   with the champion called out.
+   to score a new row -- a separate concern from this comparison view.
+   Two tabs: per-series actual-vs-predicted across any subset of the 7
+   models, and an overall aggregate-MAPE comparison with the champion
+   called out.
 
 ================================================================================
 KEY CONCEPTS GLOSSARY (WORTH KNOWING COLD FOR AN INTERVIEW)
@@ -430,7 +353,7 @@ KEY CONCEPTS GLOSSARY (WORTH KNOWING COLD FOR AN INTERVIEW)
   unless explicitly pinned via *_NUM_THREADS env vars.
 - Prometheus vs. Grafana: Prometheus COLLECTS + STORES time-series
   metrics; Grafana VISUALIZES whatever Prometheus (or another
-  data source) has stored. Neither does the other's job.
+  data source) has stored.
 - Drift monitoring vs. accuracy evaluation: accuracy needs ground truth
   (checked once, offline, in MLflow); drift is a live, leading proxy
   checkable without waiting for ground truth to arrive.
@@ -442,7 +365,7 @@ SUMMARY CHECKLIST
 Phase 0: Setup            | Kaggle + DagsHub tokens   | venv, requirements.txt, Docker Desktop
 Phase 1: Data + Baseline  | M5 dataset                | data_prep.py, baseline.py -> 78.58%/10.75% MAPE
 Phase 2: EDA              | --                        | notebooks/eda.ipynb (seasonality, SNAP, events)
-Phase 3: Per-series models| --                        | train.py (Prophet), train_arima.py (SARIMA)
+Phase 3: Per-series models| --                        | train_svm.py (SVR), train_arima.py (SARIMA)
 Phase 4: Global ML models | --                        | feature_engineering.py, train_ml_models.py
 Phase 5: Tracking/Registry| MLflow server, DVC/DagsHub| compare_models.py, promote_champion.py -> LightGBM champion
 Phase 6: Serving          | --                        | serving/app.py + Dockerfile

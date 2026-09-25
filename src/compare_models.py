@@ -1,18 +1,14 @@
 """
-Assemble the full model comparison across every approach tried in this
-project, and select a champion.
+Assemble the full model comparison across every approach in this
+project and identify the champion.
 
-Selection metric: aggregate MAPE, not mean per-series MAPE. Justified by
-a concrete finding from the ARIMA run: one series (a likely stockout/
-discontinuation mid-test-period, invisible in training history) produced
-an 856% single-series MAPE that dragged ARIMA's *mean* per-series MAPE
-up to 85% -- worse than even the naive baseline -- while ARIMA's
-*aggregate* MAPE (18.5%) and *median* per-series MAPE (43.9%) told a much
-more reasonable story. Aggregate MAPE is far less sensitive to a single
-pathological series, which is exactly the property wanted in a model
-*selection* metric (median per-series MAPE also resists this and is
-reported here too, but aggregate MAPE is what's used to serve the
-model-comparison headline number throughout this project).
+Selection metric: aggregate MAPE rather than mean per-series MAPE.
+ARIMA's mean per-series MAPE is dominated by a single outlier series
+(an 856% error traced to a mid-test-window stockout), while its
+aggregate MAPE tells a far more representative story -- aggregate MAPE
+is much less sensitive to one pathological series, which is the
+property wanted in a selection metric. Median per-series MAPE is also
+reported for the same reason.
 """
 
 import pandas as pd
@@ -21,12 +17,12 @@ RESULTS_DIR = "results"
 
 SUMMARY_FILES = {
     "naive_seasonal_lag7": f"{RESULTS_DIR}/baseline_summary.csv",
-    "prophet": f"{RESULTS_DIR}/prophet_summary.csv",
+    "svm": f"{RESULTS_DIR}/svm_summary.csv",
     "arima": f"{RESULTS_DIR}/arima_summary.csv",
 }
 PER_SERIES_FILES = {
     "naive_seasonal_lag7": f"{RESULTS_DIR}/baseline_mape_per_series.csv",
-    "prophet": f"{RESULTS_DIR}/prophet_mape_per_series.csv",
+    "svm": f"{RESULTS_DIR}/svm_mape_per_series.csv",
     "arima": f"{RESULTS_DIR}/arima_mape_per_series.csv",
     "linear_regression": f"{RESULTS_DIR}/linear_regression_mape_per_series.csv",
     "random_forest": f"{RESULTS_DIR}/random_forest_mape_per_series.csv",
@@ -40,15 +36,13 @@ def median_per_series_mape(model: str) -> float:
     path = PER_SERIES_FILES.get(model)
     if path is None:
         return float("nan")
-    df = pd.read_csv(path)
-    return df["mape"].median()
+    return pd.read_csv(path)["mape"].median()
 
 
 def main():
     rows = []
     for model, path in SUMMARY_FILES.items():
-        df = pd.read_csv(path)
-        row = df.iloc[0].to_dict()
+        row = pd.read_csv(path).iloc[0].to_dict()
         row["model"] = model
         row["median_per_series_mape"] = median_per_series_mape(model)
         rows.append(row)

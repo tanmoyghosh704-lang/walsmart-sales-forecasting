@@ -2,12 +2,10 @@
 Scope the full M5 dataset down to a manageable subset and reshape it into
 long format (one row per series-day) joined with calendar features.
 
-Why a subset: M5 has ~30,490 store-item series. Training/evaluating a
-model per series at that scale is slow to iterate on and unnecessary to
-demonstrate the pipeline. We pick the top-N series by total historical
-volume — high-volume series have less intermittent (zero-heavy) demand,
-which makes MAPE a meaningful metric instead of being dominated by
-divide-by-zero noise from slow-moving items.
+M5 has ~30,490 store-item series, too many to iterate on quickly. This
+keeps the top-N by total historical volume: high-volume series have
+less intermittent (zero-heavy) demand, which keeps MAPE meaningful
+instead of being dominated by divide-by-zero noise from slow movers.
 """
 
 import pandas as pd

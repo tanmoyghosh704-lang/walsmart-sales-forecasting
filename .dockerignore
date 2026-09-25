@@ -1,7 +1,6 @@
-# Keep the Docker build context small -- only serving/app.py, mlflow.db,
-# mlruns/, and the two small data files it needs actually get COPYd into
-# the image, but *everything not excluded here* still gets sent to the
-# Docker daemon as build context regardless of which COPY lines exist.
+# Keep the Docker build context small. Everything not excluded here
+# still gets sent to the Docker daemon as build context, regardless of
+# which files a Dockerfile's COPY lines actually use.
 
 .venv/
 .git/

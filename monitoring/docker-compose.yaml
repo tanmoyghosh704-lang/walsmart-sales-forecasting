@@ -1,13 +1,11 @@
 # Monitoring stack: the FastAPI serving app + Prometheus (scrapes it) +
 # Grafana (visualizes it). Separate from the root docker-compose.yaml
-# (Airflow) so each phase stays independently runnable/verifiable.
+# so each stack stays independently runnable.
 #
-# Note: `build.context: ..` because Compose resolves relative paths
-# against *this file's* directory (monitoring/), not the CWD it's
-# invoked from -- serving/Dockerfile needs the repo root as context to
-# reach data/raw/calendar.csv etc, same as it does when built directly.
+# `build.context: ..` because Compose resolves relative paths against
+# this file's directory, and serving/Dockerfile needs the repo root.
 #
-# Usage (run from anywhere, -f makes the compose-relative paths work):
+# Usage:
 #   docker compose -f monitoring/docker-compose.yaml up -d --build
 #   Grafana:    http://localhost:3000  (admin / admin)
 #   Prometheus: http://localhost:9090

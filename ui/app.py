@@ -2,24 +2,18 @@
 Streamlit demo UI for the M5 forecasting project.
 
 Two views:
-1. Per-series backtest comparison -- pick one of the 100 series, see
-   actual sales (history + held-out test window) plotted against every
-   model's test-period predictions, with each model's MAPE for that
-   specific series.
-2. Overall model comparison -- the same headline numbers from
-   results/full_model_comparison.csv (aggregate MAPE across all 100
-   series), so the per-series view can't be mistaken for the full
-   picture. The champion model registered in MLflow is called out.
+1. Per-series backtest -- pick one of the 100 series, see actual sales
+   plotted against every model's test-period predictions, with each
+   model's MAPE for that series.
+2. Overall model comparison -- aggregate MAPE across all 100 series
+   from results/full_model_comparison.csv, with the registered champion
+   called out.
 
-This reads pre-computed backtest results (results/*_forecasts.csv) rather
-than generating live forecasts for arbitrary future dates. Reason: the
-champion model (LightGBM) is a *global* model that needs the full
-feature set (lag_28, rolling stats, price, calendar) to score new rows --
-building that feature pipeline live for arbitrary future dates is a
-different, larger piece of work than this demo needs. What's genuinely
-useful here -- and what an interviewer would actually want to see -- is
-"how well did each approach do on the same held-out test window,"
-visualized per series, not a black-box future forecast.
+Reads pre-computed backtest results (results/*_forecasts.csv) rather
+than generating live forecasts for arbitrary future dates -- the
+champion (LightGBM) is a global model that needs the full engineered
+feature set to score a new row, which is a separate concern from this
+comparison view.
 """
 
 import pandas as pd
@@ -31,20 +25,15 @@ RESULTS_DIR = "results"
 
 MODELS = {
     "Naive (seasonal lag-7)": "baseline",
-    "Prophet": "prophet",
+    "SVM": "svm",
     "ARIMA": "arima",
     "Linear Regression": "linear_regression",
     "Random Forest": "random_forest",
     "XGBoost": "xgboost",
     "LightGBM (champion)": "lightgbm",
 }
-COMPARISON_KEY = {
-    "baseline": "naive_seasonal_lag7", "prophet": "prophet", "arima": "arima",
-    "linear_regression": "linear_regression", "random_forest": "random_forest",
-    "xgboost": "xgboost", "lightgbm": "lightgbm",
-}
 COLORS = {
-    "baseline": "#999999", "prophet": "#4C72B0", "arima": "#C44E52",
+    "baseline": "#999999", "svm": "#4C72B0", "arima": "#C44E52",
     "linear_regression": "#8172B2", "random_forest": "#937860",
     "xgboost": "#DA8BC3", "lightgbm": "#55A868",
 }
@@ -79,7 +68,7 @@ def load_comparison():
 st.set_page_config(page_title="M5 Forecasting Demo", layout="wide")
 st.title("Walmart M5 Demand Forecasting")
 st.caption(
-    "Prophet, ARIMA, Linear Regression, Random Forest, XGBoost, and LightGBM, "
+    "SVM, ARIMA, Linear Regression, Random Forest, XGBoost, and LightGBM, "
     "all backtested on the same 28-day held-out window across 100 store-item series."
 )
 
@@ -91,7 +80,7 @@ with st.sidebar:
     selected_series = st.selectbox("Series (item at store)", series_ids)
     selected_models = st.multiselect(
         "Models to compare", list(MODELS.keys()),
-        default=["Naive (seasonal lag-7)", "Prophet", "LightGBM (champion)"],
+        default=["Naive (seasonal lag-7)", "SVM", "LightGBM (champion)"],
     )
     history_days = st.slider("History window (days before test)", 30, 365, 90)
 
@@ -141,8 +130,8 @@ with tab1:
         st.subheader(f"MAPE for {selected_series} (this series only)")
         st.dataframe(pd.DataFrame(mape_rows), hide_index=True, use_container_width=True)
         st.caption(
-            "A single series' MAPE is noisy (see results/writeup.md) -- "
-            "check the Overall comparison tab for the metric actually used to pick the champion."
+            "A single series' MAPE is noisy -- check the Overall comparison tab "
+            "for the metric actually used to pick the champion."
         )
 
 with tab2:
@@ -171,9 +160,10 @@ with tab2:
     st.plotly_chart(bar, use_container_width=True)
 
     st.info(
-        "**Champion: LightGBM** (5.82% aggregate MAPE), registered in the MLflow Model Registry "
-        "as `sales_lightgbm` with alias `champion`. Selected on **aggregate MAPE**, not mean "
-        "per-series MAPE -- ARIMA's mean per-series MAPE (85%) was dragged up by a single series "
-        "with an 856% error (a mid-test-window stockout no history-only model could have predicted), "
-        "while its aggregate MAPE (18.5%) told a more representative story. See results/writeup.md."
+        "**Champion: LightGBM**, registered in the MLflow Model Registry as "
+        "`sales_lightgbm` with alias `champion`. Selected on **aggregate MAPE**, "
+        "not mean per-series MAPE -- ARIMA's mean per-series MAPE was dragged up by "
+        "a single series with an 856% error (a mid-test-window stockout no "
+        "history-only model could have predicted), while its aggregate MAPE told "
+        "a more representative story."
     )
