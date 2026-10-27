@@ -3,6 +3,8 @@ uvicorn[standard]
 pydantic
 mlflow
 scikit-learn
+xgboost
+lightgbm
 pandas
 numpy
 scipy

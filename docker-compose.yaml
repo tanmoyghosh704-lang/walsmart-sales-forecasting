@@ -1,67 +1,163 @@
-# docker compose up airflow-init   # one-off: migrate DB, create admin user
-# docker compose up -d             # start webserver + scheduler
-# http://localhost:8080  (user: airflow / pass: airflow)
-
-x-airflow-common: &airflow-common
-  build:
-    context: .
-    dockerfile: airflow/Dockerfile
-  environment:
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__WEBSERVER__SECRET_KEY: "m5-local-dev-secret-key"
-    MLFLOW_TRACKING_URI: http://host.docker.internal:5000
-  volumes:
-    - ./airflow/dags:/opt/airflow/dags
-    - ./airflow/logs:/opt/airflow/logs
-    - ./src:/opt/airflow/project/src
-    - ./data:/opt/airflow/project/data
-    - ./results:/opt/airflow/project/results
-  depends_on:
-    postgres:
-      condition: service_healthy
+# One stack: Airflow (orchestration, single standalone container) +
+# serving (FastAPI) + Prometheus/Grafana (monitoring). MLflow is NOT
+# self-hosted: every component points at DagsHub's hosted MLflow-compatible
+# tracking server + model registry (https://dagshub.com/<owner>/<repo>.mlflow,
+# see src/common.py) instead of running mlflow-server + SQLite locally --
+# that's a compose service and two volumes fewer, and the MLflow UI is
+# just the DagsHub web UI. Auth is HTTP basic via MLFLOW_TRACKING_USERNAME/
+# MLFLOW_TRACKING_PASSWORD (password = a DagsHub access token), set in .env.
+# Training is NOT a long-running service here -- the airflow container
+# launches one-shot `m5-training` containers per retrain/compare/promote
+# task via DockerOperator (see airflow/dags/retrain_dag.py), so `training`
+# below only needs to be built, never started directly.
+#
+#   docker compose build         # build every image, incl. m5-training
+#   docker compose up -d         # start everything
+#
+# `airflow standalone` self-initializes its own SQLite metadata DB (volume
+# airflow_data below) and creates an admin user on first boot -- the
+# generated password is printed to `docker compose logs airflow` (also
+# saved at /opt/airflow/standalone_admin_password.txt inside the
+# container). No separate postgres/init/webserver/scheduler containers.
+# (This is Airflow's OWN metadata DB, unrelated to MLflow's backend store.)
+#
+# Before first run, set HOST_PROJECT_DIR in a .env file next to this file
+# to this repo's path AS SEEN BY THE DOCKER DAEMON (not by the airflow
+# container) -- the airflow container asks the Docker daemon to bind-mount
+# this path into each m5-training container it launches via
+# DockerOperator, and that daemon resolves paths against the host, not
+# against the airflow container's own filesystem. On Linux/macOS this is
+# just the repo's absolute path; on Windows with Docker Desktop's WSL2
+# backend use the /mnt/c/... form, e.g.:
+#   HOST_PROJECT_DIR=/mnt/c/python3_10_11/walsmart sales forecasting
+#
+# Airflow:    http://localhost:8080
+# MLflow:     https://dagshub.com/<owner>/<repo>.mlflow (DagsHub-hosted, see above)
+# API:        http://localhost:8000
+# Grafana:    http://localhost:3000  (admin / admin)
+# Prometheus: http://localhost:9090
+#
+# Secrets (GITHUB_TOKEN, HOST_PROJECT_DIR, MLFLOW_TRACKING_USERNAME,
+# MLFLOW_TRACKING_PASSWORD, ...) belong in a local .env file next to this
+# file -- .env is gitignored, see .env.example. Never put real tokens
+# directly in this file. DVC's own DagsHub credentials are a SEPARATE
+# mechanism, deliberately NOT routed through .env: they already live in
+# .dvc/config.local (gitignored, read automatically by the dvc CLI) and
+# reach the airflow container for free via the project bind-mount below.
+# (DagsHub tokens generally work for both, but DVC and MLflow authenticate
+# independently -- one .env var doesn't give you the other for free.)
 
 services:
-  postgres:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
-    volumes:
-      - postgres-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
-      interval: 5s
-      retries: 5
-
-  airflow-init:
-    <<: *airflow-common
-    entrypoint: /bin/bash
-    command:
-      - -c
-      - |
-        airflow db migrate
-        airflow users create \
-          --username airflow --password airflow \
-          --firstname Air --lastname Flow \
-          --role Admin --email airflow@example.com || true
-
-  airflow-webserver:
-    <<: *airflow-common
-    command: webserver
+  # Orchestration only. Ingestion, `dvc repro`, and the git-commit step run
+  # as plain BashOperator commands inside this container (it has git/dvc/
+  # pandas baked in, and the whole repo bind-mounted at
+  # /opt/airflow/project below). Retrain/compare/promote tasks instead
+  # launch one-shot `m5-training` containers via DockerOperator, using the
+  # Docker-socket mount below -- that's why those specific tasks need
+  # HOST_PROJECT_DIR (see the comment at the top of this file) while the
+  # Bash-based tasks just use the already-mounted /opt/airflow/project.
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: mlops-airflow:local
+    command: standalone
     ports:
       - "8080:8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
+    env_file:
+      # Besides AIRFLOW__* below, this pulls in HOST_PROJECT_DIR,
+      # GITHUB_TOKEN, and MLFLOW_TRACKING_URI/USERNAME/PASSWORD -- the DAG
+      # (airflow/dags/retrain_dag.py) reads the MLflow vars out of its own
+      # environment and forwards them into each m5-training container it
+      # launches, so they only need to be set once, here.
+      - .env
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      TRAINING_IMAGE: m5-training:latest
+      DOCKER_NETWORK: mlops-network
+    volumes:
+      - airflow_data:/opt/airflow
+      - ./airflow/dags:/opt/airflow/dags
+      - .:/opt/airflow/project
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    networks:
+      - mlops-network
 
-  airflow-scheduler:
-    <<: *airflow-common
-    command: scheduler
+  # Built via `docker compose build training`; never started as a
+  # standing service -- the airflow container launches short-lived
+  # containers from this image per DAG task.
+  training:
+    image: m5-training:latest
+    build:
+      context: .
+      dockerfile: training/Dockerfile
+    profiles: ["build-only"]
 
+  # FastAPI prediction service. MLFLOW_TRACKING_URI/USERNAME/PASSWORD come
+  # from .env via env_file -- this container resolves/loads models from
+  # DagsHub's hosted MLflow registry, same as the training containers.
+  serving-app:
+    build:
+      context: .
+      dockerfile: serving/Dockerfile
+    image: m5-forecast-api:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - mlops-network
+
+  # Prometheus monitoring service
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    depends_on:
+      - serving-app
+    networks:
+      - mlops-network
+
+  # Grafana dashboard service -- provisioning/dashboards are bind-mounted
+  # (read-only) so the drift/latency dashboard shows up pre-loaded instead
+  # of needing to be added by hand through the UI.
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - mlops-network
+
+# Persistent storage
 volumes:
-  postgres-db-volume:
+  airflow_data:
+  prometheus_data:
+  grafana_data:
+
+# Shared network. `name:` pins the literal network name (otherwise Compose
+# prefixes it with the project name) -- the airflow container's DAG needs
+# this exact string to put the one-shot training containers it launches
+# via DockerOperator on the same network as serving-app (MLflow is
+# DagsHub-hosted, reached over the public internet, not on this network).
+networks:
+  mlops-network:
+    driver: bridge
+    name: mlops-network

@@ -1,12 +1,22 @@
+import os
+
 import pandas as pd
 
 RAW_DIR = "data/raw"
 PROCESSED_DIR = "data/processed"
 N_SERIES = 100
 
+# Reads the incrementally-ingested dataset (src/ingest_new_data.py) if it
+# exists; falls back to the static Kaggle download so `dvc repro` still
+# works standalone on a fresh checkout that's never run ingestion.
+HISTORY_PATH = f"{PROCESSED_DIR}/sales_history.csv"
+SEED_PATH = f"{RAW_DIR}/sales_train_validation.csv"
+
 
 def load_raw_sales() -> pd.DataFrame:
-    return pd.read_csv(f"{RAW_DIR}/sales_train_validation.csv")
+    path = HISTORY_PATH if os.path.exists(HISTORY_PATH) else SEED_PATH
+    print(f"Loading sales from {path}")
+    return pd.read_csv(path)
 
 
 def load_calendar() -> pd.DataFrame:
@@ -43,7 +53,6 @@ def to_long_format(sales_subset: pd.DataFrame, calendar: pd.DataFrame) -> pd.Dat
 
 
 def main():
-    print(f"Loading raw sales from {RAW_DIR}/sales_train_validation.csv ...")
     sales_wide = load_raw_sales()
     print(f"Full dataset: {sales_wide.shape[0]} series x {sales_wide.shape[1]} columns")
 

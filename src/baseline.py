@@ -1,17 +1,10 @@
 import pandas as pd
 import numpy as np
 
+from common import TEST_HORIZON, mape, train_test_split
+
 PROCESSED_DIR = "data/processed"
 RESULTS_DIR = "results"
-TEST_HORIZON = 28
-
-
-def train_test_split(long_df: pd.DataFrame):
-    dates = sorted(long_df["date"].unique())
-    split_date = dates[-TEST_HORIZON]
-    train = long_df[long_df["date"] < split_date].copy()
-    test = long_df[long_df["date"] >= split_date].copy()
-    return train, test
 
 
 def seasonal_naive_forecast(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
@@ -26,11 +19,6 @@ def seasonal_naive_forecast(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataF
         series_test["forecast"] = pred
         forecasts.append(series_test)
     return pd.concat(forecasts, ignore_index=True)
-
-
-def mape(actual: np.ndarray, forecast: np.ndarray) -> float:
-    mask = actual != 0
-    return float(np.mean(np.abs((actual[mask] - forecast[mask]) / actual[mask])) * 100)
 
 
 def main():

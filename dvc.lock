@@ -1,0 +1,78 @@
+schema: '2.0'
+stages:
+  validate:
+    cmd: python src/validate_raw.py
+    deps:
+    - path: data/processed/sales_history.csv
+      hash: md5
+      md5: b09b5dc0d4fadfcf2432c118f5e2c9a5
+      size: 121767009
+    - path: data/raw/calendar.csv
+      hash: md5
+      md5: 3ffeab2991b0c8e861d008b39ea4c95c
+      size: 103469
+    - path: data/raw/sell_prices.csv
+      hash: md5
+      md5: 08c591caa99e55daf3e0ccac913f7c85
+      size: 203395785
+    - path: src/validate_raw.py
+      hash: md5
+      md5: 9e5dc3bd06352045882c0aeaad62fbd4
+      size: 3692
+    outs:
+    - path: results/data_validation_report.txt
+      hash: md5
+      md5: 20e4d57274d2681b6e1cc5a603c1bbaa
+      size: 272
+  prepare:
+    cmd: python src/data_prep.py
+    deps:
+    - path: data/processed/sales_history.csv
+      hash: md5
+      md5: b09b5dc0d4fadfcf2432c118f5e2c9a5
+      size: 121767009
+    - path: data/raw/calendar.csv
+      hash: md5
+      md5: 3ffeab2991b0c8e861d008b39ea4c95c
+      size: 103469
+    - path: results/data_validation_report.txt
+      hash: md5
+      md5: 20e4d57274d2681b6e1cc5a603c1bbaa
+      size: 272
+    - path: src/data_prep.py
+      hash: md5
+      md5: b1da6720f5964a6b32536c90d4140a5c
+      size: 2473
+    outs:
+    - path: data/processed/subset_long.csv
+      hash: md5
+      md5: f4db19c220907a63e3c3882e8f9c48b6
+      size: 23055438
+  feature_engineering:
+    cmd: python src/feature_engineering.py
+    deps:
+    - path: data/processed/subset_long.csv
+      hash: md5
+      md5: f4db19c220907a63e3c3882e8f9c48b6
+      size: 23055438
+    - path: data/raw/sell_prices.csv
+      hash: md5
+      md5: 08c591caa99e55daf3e0ccac913f7c85
+      size: 203395785
+    - path: src/feature_engineering.py
+      hash: md5
+      md5: 2c5eb56971cea50be62a5552d6c7e18e
+      size: 1072
+    - path: src/features.py
+      hash: md5
+      md5: 64a7a6dba4eb195ed890f27d79c46175
+      size: 5350
+    outs:
+    - path: data/processed/encoders.json
+      hash: md5
+      md5: e0e0c2e973949d64dd291b7cf9f53658
+      size: 1332
+    - path: data/processed/ml_features.csv
+      hash: md5
+      md5: 287907a2e96f13466bd81f33951afd24
+      size: 24538485

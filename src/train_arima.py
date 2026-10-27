@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pmdarima as pm
 
+from common import TEST_HORIZON, MLFLOW_TRACKING_URI_DEFAULT, mape, train_test_split
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -21,23 +23,9 @@ warnings.filterwarnings("ignore")
 
 PROCESSED_DIR = "data/processed"
 RESULTS_DIR = "results"
-TEST_HORIZON = 28
 
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI_DEFAULT)
 MLFLOW_EXPERIMENT = "m5-arima-forecasting"
-
-
-def train_test_split(long_df: pd.DataFrame):
-    dates = sorted(long_df["date"].unique())
-    split_date = dates[-TEST_HORIZON]
-    train = long_df[long_df["date"] < split_date].copy()
-    test = long_df[long_df["date"] >= split_date].copy()
-    return train, test
-
-
-def mape(actual: np.ndarray, forecast: np.ndarray) -> float:
-    mask = actual != 0
-    return float(np.mean(np.abs((actual[mask] - forecast[mask]) / actual[mask])) * 100)
 
 
 def snap_column(row_df: pd.DataFrame) -> pd.Series:

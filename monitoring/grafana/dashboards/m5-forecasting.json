@@ -48,8 +48,8 @@
     },
     {
       "id": 5,
-      "title": "Prediction drift (KS statistic)",
-      "description": "Two-sample KS test comparing recently-served predictions against the training sales distribution. Higher = more different from training data. See serving/app.py for methodology.",
+      "title": "Drift score (mean KS statistic across features)",
+      "description": "Last 300 /predict feature inputs (deque buffer) vs the reference distribution from the most recent dvc-tracked feature_engineering snapshot. Higher = more different from training data. See serving/app.py for methodology.",
       "type": "gauge",
       "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
       "fieldConfig": {
@@ -67,12 +67,12 @@
         },
         "overrides": []
       },
-      "targets": [{ "expr": "prediction_drift_ks_statistic" }]
+      "targets": [{ "expr": "prediction_drift_score" }]
     },
     {
       "id": 6,
-      "title": "Prediction drift (KS p-value)",
-      "description": "Low p-value = statistically significant difference between recent predictions and training distribution.",
+      "title": "Drift alert",
+      "description": "1 if prediction_drift_score has exceeded DRIFT_KS_THRESHOLD (default 0.3), else 0.",
       "type": "stat",
       "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
       "fieldConfig": {
@@ -82,15 +82,28 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 0.05 },
-              { "color": "green", "value": 0.1 }
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
             ]
           }
         },
         "overrides": []
       },
-      "targets": [{ "expr": "prediction_drift_ks_pvalue" }]
+      "targets": [{ "expr": "prediction_drift_alert" }]
+    },
+    {
+      "id": 7,
+      "title": "Per-feature KS statistic",
+      "description": "feature_drift_ks_statistic broken out per numeric feature -- shows which feature is driving the aggregate drift score.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "feature_drift_ks_statistic",
+          "legendFormat": "{{feature}}"
+        }
+      ]
     }
   ]
 }

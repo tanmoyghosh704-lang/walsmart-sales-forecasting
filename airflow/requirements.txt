@@ -1,10 +1,4 @@
-mlflow==3.15.1
+apache-airflow-providers-docker==3.14.0
+dvc
 pandas
 numpy
-scikit-learn
-lightgbm
-xgboost
-statsmodels
-pmdarima
-joblib
-scipy

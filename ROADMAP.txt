@@ -5,7 +5,7 @@ PROJECT ROADMAP & RESOURCE BREAKDOWN: WALMART M5 DEMAND FORECASTING MLOPS
 PROJECT OVERVIEW:
 An end-to-end, production-shaped demand forecasting system built on
 Kaggle's M5 Forecasting - Accuracy dataset (Walmart). Benchmarks 7
-forecasting approaches (naive seasonal baseline, SVM, SARIMA, Linear
+forecasting approaches (naive seasonal baseline, KNN, SARIMA, Linear
 Regression, Random Forest, XGBoost, LightGBM) on 100 high-volume
 store-item series over a 28-day held-out horizon, tracks and registers
 every model via MLflow with conditional champion auto-promotion,
@@ -102,6 +102,8 @@ PHASE 3: PER-SERIES MODELS -- SVM & ARIMA
      encoding of day-of-week (cyclical, so Sunday and Monday stay
      close together instead of 6 apart), and SNAP as a regular feature.
    - Result: 60.37% mean per-series MAPE / 7.83% aggregate MAPE.
+   - [Phase 13: src/train_svm.py was later replaced by src/train_knn.py --
+     SVM itself is gone from the repo. See Phase 13 notes for why.]
 
 3. ARIMA / SARIMA (src/train_arima.py):
    - `pmdarima.auto_arima`, seasonal=True, m=7 (weekly seasonality),
@@ -365,11 +367,197 @@ SUMMARY CHECKLIST
 Phase 0: Setup            | Kaggle + DagsHub tokens   | venv, requirements.txt, Docker Desktop
 Phase 1: Data + Baseline  | M5 dataset                | data_prep.py, baseline.py -> 78.58%/10.75% MAPE
 Phase 2: EDA              | --                        | notebooks/eda.ipynb (seasonality, SNAP, events)
-Phase 3: Per-series models| --                        | train_svm.py (SVR), train_arima.py (SARIMA)
+Phase 3: Per-series models| --                        | train_svm.py (SVR, later replaced -- see Phase 13),
+                          |                           | train_arima.py (SARIMA)
 Phase 4: Global ML models | --                        | feature_engineering.py, train_ml_models.py
 Phase 5: Tracking/Registry| MLflow server, DVC/DagsHub| compare_models.py, promote_champion.py -> LightGBM champion
 Phase 6: Serving          | --                        | serving/app.py + Dockerfile
 Phase 7: Orchestration    | Docker Compose            | airflow/dags/retrain_dag.py (m5_full_retrain)
 Phase 8: Monitoring       | --                        | monitoring/docker-compose.yaml (Prometheus+Grafana)
 Phase 9: Comparison UI    | --                        | ui/app.py (Streamlit)
+Phase 10: Hardening       | --                        | dvc.yaml pipeline (validate/prepare/
+                          |                           | feature_engineering), src/features.py shared
+                          |                           | train+serve, serving loads the live champion
+                          |                           | alias, per-feature drift on a 300-sample
+                          |                           | buffer, training split into its own container
+                          |                           | (m5-training) launched by Airflow via
+                          |                           | DockerOperator, mlflow-server containerized,
+                          |                           | one docker-compose.yaml for the whole stack
+Phase 11: Ingestion + DAG | --                        | src/ingest_new_data.py (simulated incremental
+simplification            |                           | ingestion), single `airflow standalone`
+                          |                           | container (git+dvc+pandas baked in, BashOperator
+                          |                           | for ingest/dvc repro/git), DockerOperator kept
+                          |                           | only for the ML training image, src/commit_
+                          |                           | artifacts.py pushes dvc.lock to GitHub
+Phase 12: MLflow on       | DagsHub access token      | mlflow-server container + SQLite backend store
+DagsHub                   |                           | removed; MLFLOW_TRACKING_URI_DEFAULT (src/
+                          |                           | common.py) points at DagsHub's hosted MLflow
+                          |                           | instead -- same repo already used as the DVC
+                          |                           | remote, now also the tracking server + registry
+Phase 13: SVM -> KNN      | --                        | src/train_svm.py deleted, src/train_knn.py added
+                          |                           | (KNeighborsRegressor, k=7, distance-weighted) --
+                          |                           | same per-series role and feature set SVM had,
+                          |                           | different inductive bias; came within 0.08 points
+                          |                           | of dethroning the LightGBM champion
+================================================================================
+
+================================================================================
+PHASE 10 NOTES -- WHY THIS PASS HAPPENED
+================================================================================
+
+Phases 0-9 above got every individual piece working, but three gaps only
+became visible once the pieces were looked at together:
+
+1. serving/app.py loaded 100 per-series SVM models by `/latest` version.
+   promote_champion.py promotes one of 4 *global* models (currently
+   LightGBM) to a `champion` alias. Those are disjoint systems -- the
+   model that gets promoted was never the model being served. Fixed by
+   having serving/app.py resolve the live `champion` alias and build the
+   same engineered feature vector training used (src/features.py), with
+   the model's feature cache refreshed on a TTL so a new promotion is
+   picked up without a restart.
+
+2. feature_engineering.py computed category encoders (`pd.factorize`)
+   but never saved them -- fine for a one-shot train/compare run where
+   the whole dataset goes through factorize together, but meant there
+   was no way to re-derive matching codes later (e.g. for a single-series
+   live request, which only ever saw one category value, re-numbering
+   codes from 0). Fixed by persisting encoders.json and using it both to
+   re-encode at serving time and to reconstruct LightGBM's full
+   categorical universe (same bug, same fix) rather than letting pandas
+   infer categories from whatever's in the request.
+
+3. DVC only versioned data (`dvc add`/`push`/`pull`, no `dvc.yaml`); the
+   two Dockerfiles that existed (airflow, serving) didn't separate
+   "orchestration" from "ML toolchain" -- Airflow's own image carried
+   every ML library in an isolated venv and ran scripts directly via
+   BashOperator; MLflow ran unmanaged on the host; two independent
+   docker-compose files never referenced each other. Fixed by adding a
+   dvc.yaml pipeline, a dedicated training image Airflow launches per
+   task via DockerOperator (docker-outside-of-docker, host socket
+   mounted), a containerized mlflow-server service, and collapsing both
+   compose files into one stack on one Docker network.
+================================================================================
+
+================================================================================
+PHASE 11 NOTES -- INGESTION + SIMPLIFYING THE AIRFLOW SETUP
+================================================================================
+
+1. The DAG had no real "data ingestion" step -- it assumed data/raw was
+   already complete and static. M5 itself IS static (no live feed), but
+   sales_train_evaluation.csv (already in data/raw/, unused until now)
+   has the same 100 series as sales_train_validation.csv plus 28 more
+   real days. src/ingest_new_data.py absorbs a 7-day chunk per run into
+   data/processed/sales_history.csv, simulating "new data arrives weekly"
+   with zero external infrastructure. Gotcha hit immediately: M5's `id`
+   column has a different suffix in each file (`_validation` vs
+   `_evaluation`) for the SAME series, so merging on `id` silently
+   produced an all-NaN join; fixed by merging on the 5 other identifier
+   columns (item_id/dept_id/cat_id/store_id/state_id), which have no
+   suffix and are jointly unique, while preserving the original `id`.
+   Deliberately NOT a dvc.yaml stage: it's stateful by construction (each
+   run's output depends on the previous run's progress, not just its
+   deps' content hash), which doesn't fit dvc's pure-function caching
+   model -- it runs as a plain DAG step before `dvc repro`.
+
+2. Four Airflow containers (postgres, init, webserver, scheduler) for a
+   single-machine weekly batch DAG was more infrastructure than the job
+   needed, and the "every task is a one-shot sibling container"
+   DockerOperator pattern applied even to light pandas/dvc/git steps. Now
+   `airflow standalone` runs everything (webserver+scheduler+triggerer)
+   in one container with its own SQLite metadata store; git, dvc, and
+   pandas are installed directly in that image, so ingestion, `dvc
+   repro`, and the git-commit step run as plain BashOperator commands
+   against the already-mounted repo -- no host-path-translation concerns
+   for those. DockerOperator is reserved for what actually needs it: the
+   four training scripts, comparison, and promotion, which need the
+   heavy ML libraries this lighter image deliberately doesn't carry.
+
+3. src/commit_artifacts.py commits dvc.lock (+ the comparison table, if
+   it exists yet) and pushes to the `origin` GitHub remote using a
+   GITHUB_TOKEN from .env, right after the DVC pipeline finishes --
+   running in parallel with training rather than blocking it, so the git
+   history records exactly what data a training run used without
+   slowing that run down.
+================================================================================
+
+================================================================================
+PHASE 12 NOTES -- MLFLOW MOVES TO DAGSHUB
+================================================================================
+
+The self-hosted `mlflow server` (SQLite backend store + local artifact
+store, its own compose service) is gone. MLFLOW_TRACKING_URI_DEFAULT
+(src/common.py) now points at DagsHub's hosted, MLflow-compatible
+tracking server + model registry -- every DagsHub repo gets one for free
+at `https://dagshub.com/<owner>/<repo>.mlflow`, and this project was
+already using DagsHub as its DVC remote, so it's the same repo doing
+double duty rather than a new dependency. The MLflow UI is just that
+repo's "Experiments" tab on dagshub.com -- nothing to run locally.
+
+Nothing about *how* the code talks to MLflow changed: every script still
+calls `mlflow.set_tracking_uri(...)` exactly as before. What changed is
+only the URI and that the client now needs HTTP basic auth
+(`MLFLOW_TRACKING_USERNAME`/`MLFLOW_TRACKING_PASSWORD`, the latter a
+DagsHub access token) -- the `mlflow` client reads both automatically from
+the environment, so this added zero new code, just env vars threaded
+through `.env` -> `docker-compose.yaml` (`env_file`) -> the DAG's
+`training_task()` (which forwards them into each one-shot training
+container it launches) -> `serving/app.py`.
+
+Gotcha worth remembering: DVC's DagsHub credentials
+(`.dvc/config.local`) and MLflow's (`.env`) are TWO SEPARATE auth flows
+against the same host, even though a DagsHub access token can be reused
+for both. Setting one does not set the other -- each tool authenticates
+independently, which is easy to forget when they happen to point at the
+same DagsHub repo.
+================================================================================
+
+================================================================================
+PHASE 13 NOTES -- SWAPPING THE PER-SERIES ML MODEL (SVM -> KNN)
+================================================================================
+
+The per-series "general ML model" slot (as opposed to SARIMA, the
+per-series classical time-series model) moved from SVR (Support Vector
+Regression, RBF kernel) to KNeighborsRegressor. Reasoning, for the record:
+
+1. The lineup already had plenty of tree-ensemble and linear coverage on
+   the global-model side (Linear Regression, Random Forest, XGBoost,
+   LightGBM). SVM's actual role in the benchmark was "the one per-series
+   model with a genuinely different inductive bias" -- a kernel method
+   doing margin-based regression in a transformed feature space. KNN
+   fills that same role with an even more different bias: pure
+   instance-based local averaging, no explicit decision boundary or
+   kernel trick at all. Two fundamentally different non-tree, non-linear
+   approaches side by side (KNN here, gradient-boosted trees on the
+   global side) makes a more informative comparison table than having
+   SVM sit as a second "yet another nonlinear regressor" entry.
+
+2. Implementation is a near drop-in replacement: same feature set
+   (`trend`, `dow_sin`, `dow_cos`, `snap`), same `StandardScaler` ->
+   estimator `Pipeline` (KNN's Euclidean distance is just as
+   scale-sensitive as SVR was), same joblib-parallel-across-series
+   training loop, same MLflow logging pattern (one registered model per
+   series, `knn_<series_id>`). Only `fit_one_series`'s model definition
+   changed. No new dependency -- `KNeighborsRegressor` ships in the same
+   `scikit-learn` package `SVR` came from.
+
+3. `N_NEIGHBORS = 7` with `weights="distance"` was chosen deliberately,
+   not left at sklearn's default of 5: 7 is one seasonal week, matching
+   the cyclical `dow_sin`/`dow_cos` encoding already built into the
+   feature set -- the model's own neighbor count echoes the seasonality
+   its features are already trying to capture. Distance-weighting means
+   the closest matching days (by trend position, day-of-week angle, and
+   SNAP status) count for more than farther ones, rather than averaging
+   all 7 equally.
+
+4. Measured result (computed directly against real data, bypassing
+   MLflow locally since that needs credentials): 74.42% mean per-series /
+   30.92% median per-series / 5.90% aggregate MAPE. That's SECOND place
+   by aggregate MAPE, just 0.08 points behind the LightGBM champion
+   (5.82%) -- closer to dethroning it than any other non-champion model.
+   Notably, KNN's MEDIAN per-series MAPE (30.92%) is actually the best of
+   any model in the whole comparison, better than LightGBM's own (33.60%)
+   -- a reminder that mean and median per-series MAPE can rank models
+   differently, which is exactly why this project reports both instead of
+   picking one.
 ================================================================================

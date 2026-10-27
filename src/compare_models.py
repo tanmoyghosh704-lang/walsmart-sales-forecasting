@@ -4,12 +4,12 @@ RESULTS_DIR = "results"
 
 SUMMARY_FILES = {
     "naive_seasonal_lag7": f"{RESULTS_DIR}/baseline_summary.csv",
-    "svm": f"{RESULTS_DIR}/svm_summary.csv",
+    "knn": f"{RESULTS_DIR}/knn_summary.csv",
     "arima": f"{RESULTS_DIR}/arima_summary.csv",
 }
 PER_SERIES_FILES = {
     "naive_seasonal_lag7": f"{RESULTS_DIR}/baseline_mape_per_series.csv",
-    "svm": f"{RESULTS_DIR}/svm_mape_per_series.csv",
+    "knn": f"{RESULTS_DIR}/knn_mape_per_series.csv",
     "arima": f"{RESULTS_DIR}/arima_mape_per_series.csv",
     "linear_regression": f"{RESULTS_DIR}/linear_regression_mape_per_series.csv",
     "random_forest": f"{RESULTS_DIR}/random_forest_mape_per_series.csv",

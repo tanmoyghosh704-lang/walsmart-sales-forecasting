@@ -35,3 +35,4 @@ access_token
 # Generated at runtime by the training/comparison scripts
 results/*.csv
 results/*.png
+results/*.txt

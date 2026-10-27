@@ -1,0 +1,42 @@
+# Ingestion (src/ingest_new_data.py -> data/processed/sales_history.csv) is
+# deliberately NOT a stage here: it's stateful by design (each run absorbs
+# whatever new data has arrived since last time), and dvc.yaml's caching
+# model assumes a stage is a pure function of its deps -- it would just see
+# unchanged deps (the two static source CSVs) and skip re-running forever.
+# The DAG runs it directly, before `dvc repro`; this pipeline starts from
+# its output.
+stages:
+  validate:
+    cmd: python src/validate_raw.py
+    wdir: .
+    deps:
+      - data/processed/sales_history.csv
+      - data/raw/calendar.csv
+      - data/raw/sell_prices.csv
+      - src/validate_raw.py
+    outs:
+      - results/data_validation_report.txt:
+          cache: false
+
+  prepare:
+    cmd: python src/data_prep.py
+    wdir: .
+    deps:
+      - results/data_validation_report.txt
+      - data/processed/sales_history.csv
+      - data/raw/calendar.csv
+      - src/data_prep.py
+    outs:
+      - data/processed/subset_long.csv
+
+  feature_engineering:
+    cmd: python src/feature_engineering.py
+    wdir: .
+    deps:
+      - data/processed/subset_long.csv
+      - data/raw/sell_prices.csv
+      - src/feature_engineering.py
+      - src/features.py
+    outs:
+      - data/processed/ml_features.csv
+      - data/processed/encoders.json

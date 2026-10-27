@@ -15,38 +15,17 @@ from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
+from common import TEST_HORIZON, MLFLOW_TRACKING_URI_DEFAULT, mape, train_test_split
+from features import ALL_FEATURES, CATEGORICAL_FEATURES, NUMERIC_FEATURES
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PROCESSED_DIR = "data/processed"
 RESULTS_DIR = "results"
-TEST_HORIZON = 28
 
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI_DEFAULT)
 MLFLOW_EXPERIMENT = "m5-model-comparison"
-
-NUMERIC_FEATURES = [
-    "lag_28", "rolling_mean_7_lag28", "rolling_mean_28_lag28", "rolling_std_28_lag28",
-    "wday", "month", "year", "is_weekend", "has_event", "snap", "sell_price",
-]
-CATEGORICAL_FEATURES = [
-    "item_id_code", "dept_id_code", "cat_id_code", "store_id_code",
-    "state_id_code", "event_type_1_code",
-]
-ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
-
-
-def train_test_split(df: pd.DataFrame):
-    dates = sorted(df["date"].unique())
-    split_date = dates[-TEST_HORIZON]
-    train = df[df["date"] < split_date].copy()
-    test = df[df["date"] >= split_date].copy()
-    return train, test
-
-
-def mape(actual: np.ndarray, forecast: np.ndarray) -> float:
-    mask = actual != 0
-    return float(np.mean(np.abs((actual[mask] - forecast[mask]) / actual[mask])) * 100)
 
 
 def evaluate(test: pd.DataFrame, y_pred: np.ndarray):

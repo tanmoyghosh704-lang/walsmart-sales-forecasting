@@ -5,30 +5,39 @@ import mlflow
 import pandas as pd
 from mlflow import MlflowClient
 
+from common import CHAMPION_ALIAS as ALIAS
+from common import MLFLOW_TRACKING_URI_DEFAULT, PROMOTABLE_MODELS
+
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 RESULTS_DIR = "results"
-MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-ALIAS = "champion"
-
-PROMOTABLE_MODELS = {
-    "linear_regression": "sales_linear_regression",
-    "random_forest": "sales_random_forest",
-    "xgboost": "sales_xgboost",
-    "lightgbm": "sales_lightgbm",
-}
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI_DEFAULT)
 
 
-def get_current_champion_mape(client: MlflowClient):
+def get_current_champion(client: MlflowClient):
+    """Return the (name, version, aggregate_mape) of whichever promotable
+    model currently carries the champion alias.
+
+    At most one model should ever carry it -- promote() below removes the
+    alias from every other promotable model whenever it promotes a new one,
+    so a stale alias left on an old model family can't be mistaken for the
+    live champion.
+    """
+    found = []
     for name in PROMOTABLE_MODELS.values():
         try:
             mv = client.get_model_version_by_alias(name, ALIAS)
         except Exception:
             continue
         run = client.get_run(mv.run_id)
-        return name, run.data.metrics.get("aggregate_mape")
-    return None, None
+        found.append((name, mv.version, run.data.metrics.get("aggregate_mape")))
+    if len(found) > 1:
+        print(f"WARNING: {len(found)} models carry the '{ALIAS}' alias simultaneously "
+              f"({[n for n, _, _ in found]}); this should not happen. Using the first.")
+    if not found:
+        return None, None, None
+    return found[0]
 
 
 def main():
@@ -51,7 +60,7 @@ def main():
     best_name = PROMOTABLE_MODELS[best_key]
     best_mape = float(best["aggregate_mape"])
 
-    current_name, current_mape = get_current_champion_mape(client)
+    current_name, current_version, current_mape = get_current_champion(client)
 
     if current_mape is not None and current_mape <= best_mape:
         print(f"Current champion ({current_name}, {current_mape:.2f}% aggregate MAPE) "
@@ -68,6 +77,18 @@ def main():
         description=f"Champion: {best_mape:.2f}% aggregate MAPE "
                      f"(full comparison in results/full_model_comparison.csv).",
     )
+
+    # Only one model should ever carry the champion alias. If the new
+    # champion is a different model family than the previous one, the old
+    # family's alias is now stale -- drop it so a future lookup can't find
+    # two (or more) models both claiming to be champion.
+    for name in PROMOTABLE_MODELS.values():
+        if name == best_name:
+            continue
+        try:
+            client.delete_registered_model_alias(name, ALIAS)
+        except Exception:
+            pass
 
     if current_mape is None:
         print(f"No prior champion found. Promoted {best_name} v{latest.version} "
